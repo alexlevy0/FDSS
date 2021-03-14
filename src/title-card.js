@@ -4,14 +4,16 @@ const Alea = require('alea')
 const { createSpring } = require('spring-animator')
 
 const settings = {
-  text: 'Fievres du Samedi Soir',
-  particles: 800,
+  // text: 'Fievres \ndu \nSamedi Soir',
+  text: `Fièvres du Samedi Soir`,
+  particles: 900,
   dampening: 0.35, // 0.17
   stiffness: 0.85, // 0.9
-  speed: 250,
+  speed: 150,
+  // speed: 350,
   // speed: 50,
   // precision: 0.98,
-  precision: 0.80,
+  precision: 0.8,
   lineOpacity: 0.17,
   turnGranularity: 12,
   startSpreadMultiplier: 0.35,
@@ -212,7 +214,7 @@ function getSource () {
   hiddenCanvas.style.display = 'none'
   hiddenCtx.fillStyle = 'rgb(255, 255, 255)'
   hiddenCtx.fillRect(0, 0, hiddenCanvas.width, hiddenCanvas.height)
-  printText(hiddenCtx, settings.text, Math.min(hiddenCanvas.width, hiddenCanvas.height) * 0.1)
+  printText(hiddenCtx, settings.text, Math.min(hiddenCanvas.width, hiddenCanvas.height) * 0.07)
   const picker = makePixelPicker(hiddenCanvas)
   hiddenCanvas.parentElement.removeChild(hiddenCanvas)
   return picker

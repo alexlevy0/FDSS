@@ -1,10 +1,12 @@
 <!DOCTYPE html>
 <html lang="en" dir="ltr">
+
 <head>
   <title>Fievres du Samedi Soir</title>
   <meta charset="utf-8">
   <meta name="description" content="Fievres du Samedi Soir">
-  <meta name="news_keywords" content="fievresdusamedisoir, instagram, music, music visualization, webgl, 3d, data viz, data, data vis">
+  <meta name="news_keywords"
+    content="fievresdusamedisoir, instagram, music, music visualization, webgl, 3d, data viz, data, data vis">
 
   <meta property="og:title" content="FievresDuDamediSoir">
   <meta property="og:description" content="Fievres du Samedi Soir ">
@@ -15,11 +17,12 @@
     @font-face {
       font-family: 'Open Sans';
       src: url('src/fonts/OpenSans-Regular.ttf') format('ttf'),
-           url('src/fonts/OpenSans-Regular.woff') format('woff'),
-           url('src/fonts/OpenSans-Regular.woff2') format('woff2');
+        url('src/fonts/OpenSans-Regular.woff') format('woff'),
+        url('src/fonts/OpenSans-Regular.woff2') format('woff2');
     }
 
-    html, body {
+    html,
+    body {
       color: #e2e2e2;
       /* background-color: rgb(45, 45, 45); */
       background-color: rgb(0, 0, 0);
@@ -28,6 +31,7 @@
       margin: 0;
       padding: 0;
     }
+
     .title-card-container {
       position: absolute;
       height: 100vh;
@@ -36,6 +40,7 @@
       left: 0;
       z-index: 8;
     }
+
     .instructions {
       opacity: 0;
       transition: opacity 1000ms linear;
@@ -47,13 +52,15 @@
       font-size: 18px;
       letter-spacing: 8px;
     }
+
     .instructions button {
       margin-top: 50px;
       color: rgb(230, 230, 230);
       padding: 25px 50px;
       transition: background-color 150ms linear;
-      /* background-color: rgba(60, 60, 60, 0.95); */
       background-color: rgba(0, 0, 0);
+
+      /* background-color: rgba(60, 60, 60, 0.95); */
       border: 1px solid rgb(70, 70, 70);
       cursor: pointer;
       font-size: 14px;
@@ -61,33 +68,38 @@
       outline: 0;
       font-family: inherit;
     }
+
     .instructions button:hover {
       background-color: rgba(70, 70, 70, 1);
     }
+
     .ios-instructions {
       display: none;
       text-align: center;
       margin: 5vh auto 0;
       width: 70vw;
     }
+
     .ios-instructions h2 {
       font-size: 28px;
       font-weight: 800;
     }
+
     .ios-instructions video {
       width: 100%;
     }
+
     .controls-container {
       opacity: 0;
       margin: 10px;
       width: 290px;
       padding-top: 30px;
       position: relative;
-      /* background-color: rgba(60, 60, 60, 0.65); */
-      background-color: rgba(0, 0, 0);
+      background-color: rgba(60, 60, 60, 0.65);
       border: 1px solid rgb(80, 80, 80);
       z-index: 9;
     }
+
     .controls-header {
       padding: 20px 25px;
       font-weight: 200;
@@ -95,6 +107,7 @@
       color: #eee;
       position: relative;
     }
+
     .github-link {
       position: absolute;
       fill: #888;
@@ -102,14 +115,28 @@
       right: 20px;
       transition: fill 200ms linear;
     }
+
     .github-link:hover {
       fill: #eee;
     }
+    .insta-link {
+      position: absolute;
+      fill: #888;
+      top: -15px;
+      left: 20px;
+      transition: fill 200ms linear;
+    }
+
+    .insta-link:hover {
+      fill: #eee;
+    }
+
     .artist {
       font-size: 11px;
       text-transform: uppercase;
       color: #aaa;
     }
+
     .elapsed-time {
       position: absolute;
       bottom: 20px;
@@ -118,14 +145,15 @@
       font-size: 13px;
       color: #eee;
     }
+
     .seeker {
       height: 5px;
       width: 100%;
-      /* background-color: rgba(90, 90, 90, 0.5); */
-      background-color: rgba(0, 0, 0);
+      background-color: rgba(90, 90, 90, 0.5);
       cursor: pointer;
       position: relative;
     }
+
     .progress {
       height: 100%;
       position: absolute;
@@ -133,6 +161,7 @@
       left: -1px;
       background-color: #eee;
     }
+
     .track-selector {
       margin: 0 0 20px 0;
       position: relative;
@@ -141,6 +170,7 @@
       list-style: none;
       padding: 0;
     }
+
     .track {
       margin: 10px 0 10px 25px;
       position: relative;
@@ -148,15 +178,19 @@
       transition: color 200ms linear;
       color: #888;
     }
+
     .track span {
       margin-right: 15px;
     }
+
     .track:hover {
       color: #bbb;
     }
+
     .track.selected {
       color: #eee;
     }
+
     .hint {
       display: none;
       padding: 20px;
@@ -167,7 +201,22 @@
       color: #aaa;
     }
   </style>
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-67M4RNKP2Q"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag() { dataLayer.push(arguments); }
+    gtag('js', new Date());
+
+    gtag('config', 'G-67M4RNKP2Q');
+  </script>
+  <script>
+    function playPause() {
+      window.dispatchEvent(new KeyboardEvent('keypress', { 'key': ' ' }));
+    }
+  </script>
 </head>
+
 <body>
   <canvas class="viz"></canvas>
   <div class="title-card-container">
@@ -179,6 +228,12 @@
   </div>
   <div class="controls-container">
     <div class="controls-header">
+      <a onclick="playPause()" class="github-link">
+        ⏯️
+      </a>
+      <a target="_blank" href="https://www.instagram.com/fievresdusamedisoir/" class="insta-link">
+        🕴
+      </a>
       <div class="title"></div>
       <div class="artist"></div>
       <div class="elapsed-time"></div>
@@ -190,13 +245,6 @@
     <div class="hint">DRAG AND SCROLL TO PAN AND ZOOM</div>
   </div>
   <script src="bundle.js"></script>
-  <script>
-    (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
-    (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
-    m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
-    })(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
-    ga('create', 'UA-36884625-1', 'auto');
-    ga('send', 'pageview');
-  </script>
 </body>
+
 </html>
