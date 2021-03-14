@@ -85,6 +85,7 @@ module.exports = function createTitleCard () {
   }
 
   function setup () {
+    console.log(`alexlevy0 🕴`)
     const seed = Math.random() * 1000 | 0 // 74 & 336 looks good
     rand = new Alea(seed)
     console.log(`seed: ${seed}`)
