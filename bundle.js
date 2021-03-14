@@ -12167,11 +12167,12 @@ const settings = {
   particles: 900,
   dampening: 0.35, // 0.17
   stiffness: 0.85, // 0.9
+  // speed: 150,
+  // speed: 10,
   speed: 150,
-  // speed: 350,
   // speed: 50,
-  // precision: 0.98,
-  precision: 0.8,
+  precision: 0.98,
+  // precision: 0.8,
   lineOpacity: 0.17,
   turnGranularity: 12,
   startSpreadMultiplier: 0.35,
@@ -12205,7 +12206,7 @@ module.exports = function createTitleCard () {
       start = Date.now()
       setTimeout(() => {
         css(instructions, { opacity: 1 })
-      }, 1500)
+      }, 3500)
       setup()
       loop()
       return new Promise((resolve) => {
