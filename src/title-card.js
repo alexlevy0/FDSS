@@ -75,7 +75,7 @@ module.exports = function createTitleCard () {
       transition: 'opacity 1500ms linear',
       opacity: 0
     })
-    css(instructions, { opacity: 0 })
+    // css(instructions, { opacity: 0 })
     setTimeout(() => {
       window.removeEventListener('resize', resize)
       window.cancelAnimationFrame(rAFToken)
