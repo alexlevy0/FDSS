@@ -11,7 +11,8 @@ const settings = {
   stiffness: 0.85, // 0.9
   // speed: 150,
   // speed: 10,
-  speed: 150,
+  speed: 100,
+  // speed: 150,
   // speed: 50,
   precision: 0.98,
   // precision: 0.8,
