@@ -11517,21 +11517,29 @@ function formatSeconds (seconds) {
 },{"dom-css":14}],103:[function(require,module,exports){
 const createCamera = require('3d-view-controls')
 
-module.exports = function createRoamingCamera (canvas, center, eye) {
+module.exports = function createRoamingCamera(canvas, center, eye) {
   let isRoaming = false
   let timeout
 
   const camera = createCamera(canvas, {
-    zoomSpeed: 4
+    zoomSpeed: 4,
+    rotateSpeed: 4,
+    zoomMin: -1,
+    zoomMax: 0
+    // zoomMin: 5
+    // eye: [50, 0, 0],
+    // center: [0, 0, 0],
+    // zoomMin: 0,
   })
 
   camera.lookAt(
     center,
     eye,
-    [0.52, -0.11, 50]
+    // [0.52, -0.11, 50]
+    [0, 0, 0]
   )
 
-  function getPositionFromRads (position, rads) {
+  function getPositionFromRads(position, rads) {
     position[0] = Math.sin(rads) * 1.5
     position[1] = Math.cos(rads) * 2.7
     position[2] = (Math.sin(rads) * 0.5 + 0.5) * 3 + 0.5
@@ -11545,16 +11553,17 @@ module.exports = function createRoamingCamera (canvas, center, eye) {
   let cameraUp = new Float32Array(3)
   let currentPosition = getPositionFromRads(new Float32Array(3), currentRads)
 
-  function start () {
+  function start() {
     // temporarily disabling these until I figure out how to make the camera
     // gently start moving after an interaction - i think the gentle motion
     // of the camera is an important part of the visualization
     // canvas.addEventListener('mousedown', stopRoaming)
+    canvas.addEventListener('touchstart', stopRoaming)
     window.addEventListener('wheel', stopRoaming)
     isRoaming = true
   }
 
-  function tick () {
+  function tick() {
     camera.tick()
     // very minor performance improvement by minimizing array creation in loop
     cameraUp[0] = camera.up[0]
@@ -11569,13 +11578,13 @@ module.exports = function createRoamingCamera (canvas, center, eye) {
       currentRads %= (Math.PI * 2)
     }
   }
-  function getMatrix () {
+  function getMatrix() {
     return camera.matrix
   }
-  function getCenter () {
+  function getCenter() {
     return camera.center
   }
-  function stopRoaming () {
+  function stopRoaming() {
     clearTimeout(timeout)
     timeout = null
     isRoaming = false
@@ -11645,7 +11654,7 @@ const renderBloom = createRenderBloom(regl, canvas)
 const renderBlur = createRenderBlur(regl)
 
 const tracks = [
-  {title: '#1', artist: 'fievresdusamedisoir', path: 'src/audio/fievresdusamedisoir.mp3'},
+  { title: '#1', artist: 'fievresdusamedisoir', path: 'src/audio/fievresdusamedisoir.mp3' }
   // {title: '715 - CRΣΣKS', artist: 'Bon Iver', path: 'src/audio/715-creeks.mp3'},
   // {title: 'Another New World', artist: 'Punch Brothers', path: 'src/audio/another-new-world.mp3'},
   // {title: 'The Wilder Sun', artist: 'Jon Hopkins', path: 'src/audio/the-wilder-sun.mp3'},
@@ -11741,8 +11750,8 @@ const gridGUI = gui.addFolder('grid')
 gridGUI.add(settings, 'gridLines', 10, 300).step(1).onChange(setup)
 gridGUI.add(settings, 'linesAnimationOffset', 0, 100).step(1)
 gridGUI.add(settings, 'gridMaxHeight', 0.01, 0.8).step(0.01)
-// gui.add(settings, 'motionBlur')
-// gui.add(settings, 'motionBlurAmount', 0.01, 1).step(0.01)
+gui.add(settings, 'motionBlur')
+gui.add(settings, 'motionBlurAmount', 0.01, 1).step(0.01)
 
 let hasSetUp = false
 function setup () {
@@ -11847,7 +11856,7 @@ function update () {
 
 const renderGlobals = regl({
   uniforms: {
-    projection: ({viewportWidth, viewportHeight}) => mat4.perspective(
+    projection: ({ viewportWidth, viewportHeight }) => mat4.perspective(
       [],
       Math.PI / 4,
       viewportWidth / viewportHeight,
@@ -12190,7 +12199,7 @@ window.addEventListener('resize', resize)
 
 const instructions = container.querySelector('.instructions')
 const button = container.querySelector('button')
-
+console.log({button})
 let rand, points, pixelPicker, rAFToken, start, isFading
 
 module.exports = function createTitleCard () {
@@ -12206,15 +12215,20 @@ module.exports = function createTitleCard () {
       start = Date.now()
       setTimeout(() => {
         css(instructions, { opacity: 1 })
-      }, 3500)
+      }, 300)
       setup()
       loop()
       return new Promise((resolve) => {
         button.addEventListener('click', (e) => {
+          console.log('1')
           e.preventDefault()
+          console.log('2')
           remove()
+          console.log('3')
           activateDrawers()
+          console.log('4')
           resolve()
+          console.log('5')
           return false
         })
       })

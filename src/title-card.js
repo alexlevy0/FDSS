@@ -32,7 +32,7 @@ window.addEventListener('resize', resize)
 
 const instructions = container.querySelector('.instructions')
 const button = container.querySelector('button')
-
+console.log({button})
 let rand, points, pixelPicker, rAFToken, start, isFading
 
 module.exports = function createTitleCard () {
@@ -48,15 +48,20 @@ module.exports = function createTitleCard () {
       start = Date.now()
       setTimeout(() => {
         css(instructions, { opacity: 1 })
-      }, 3500)
+      }, 300)
       setup()
       loop()
       return new Promise((resolve) => {
         button.addEventListener('click', (e) => {
+          console.log('1')
           e.preventDefault()
+          console.log('2')
           remove()
+          console.log('3')
           activateDrawers()
+          console.log('4')
           resolve()
+          console.log('5')
           return false
         })
       })

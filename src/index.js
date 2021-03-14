@@ -52,7 +52,7 @@ const renderBloom = createRenderBloom(regl, canvas)
 const renderBlur = createRenderBlur(regl)
 
 const tracks = [
-  {title: '#1', artist: 'fievresdusamedisoir', path: 'src/audio/fievresdusamedisoir.mp3'},
+  { title: '#1', artist: 'fievresdusamedisoir', path: 'src/audio/fievresdusamedisoir.mp3' }
   // {title: '715 - CRΣΣKS', artist: 'Bon Iver', path: 'src/audio/715-creeks.mp3'},
   // {title: 'Another New World', artist: 'Punch Brothers', path: 'src/audio/another-new-world.mp3'},
   // {title: 'The Wilder Sun', artist: 'Jon Hopkins', path: 'src/audio/the-wilder-sun.mp3'},
@@ -148,8 +148,8 @@ const gridGUI = gui.addFolder('grid')
 gridGUI.add(settings, 'gridLines', 10, 300).step(1).onChange(setup)
 gridGUI.add(settings, 'linesAnimationOffset', 0, 100).step(1)
 gridGUI.add(settings, 'gridMaxHeight', 0.01, 0.8).step(0.01)
-// gui.add(settings, 'motionBlur')
-// gui.add(settings, 'motionBlurAmount', 0.01, 1).step(0.01)
+gui.add(settings, 'motionBlur')
+gui.add(settings, 'motionBlurAmount', 0.01, 1).step(0.01)
 
 let hasSetUp = false
 function setup () {
@@ -270,7 +270,7 @@ function update () {
 
 const renderGlobals = regl({
   uniforms: {
-    projection: ({viewportWidth, viewportHeight}) => mat4.perspective(
+    projection: ({ viewportWidth, viewportHeight }) => mat4.perspective(
       [],
       Math.PI / 4,
       viewportWidth / viewportHeight,
