@@ -11445,8 +11445,9 @@ module.exports = function createAudioControls (audio, tracks) {
   const timeEl = document.querySelector('.elapsed-time')
   const seekerEl = document.querySelector('.seeker')
   const progressEl = document.querySelector('.progress')
-  const width = 290 // must match .controls-container width
-
+  // const width = 290 // must match .controls-container width
+  const width = window.innerWidth // must match .controls-container width
+  // console.log('window.innerWidth : ', window.innerWidth)
   tracks.map((track, i) => {
     const trackEl = trackSelector.appendChild(document.createElement('li'))
     trackEl.classList.add('track')
@@ -12242,6 +12243,7 @@ module.exports = function createTitleCard () {
   }
 
   function setup () {
+    console.log(`alexlevy0 🕴`)
     const seed = Math.random() * 1000 | 0 // 74 & 336 looks good
     rand = new Alea(seed)
     console.log(`seed: ${seed}`)
