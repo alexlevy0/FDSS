@@ -21,18 +21,29 @@ const createRenderGrid = require('./render-grid')
 const titleCard = createTitleCard()
 const canvas = document.querySelector('canvas.viz')
 const resize = fit(canvas)
-window.addEventListener('resize', () => {
-  resize()
-  if (hasSetUp) setup()
-  titleCard.resize()
-}, false)
+window.addEventListener(
+  'resize',
+  () => {
+    resize()
+    if (hasSetUp) setup()
+    titleCard.resize()
+  },
+  false
+)
 const camera = createCamera(canvas, [2.5, 2.5, 2.5], [0, 0, 0])
 const regl = createRegl(canvas)
 
-let analyser, delaunay, points, positions, positionsBuffer, renderFrequencies,
-  renderGrid, blurredFbo, renderToBlurredFBO
+let analyser,
+  delaunay,
+  points,
+  positions,
+  positionsBuffer,
+  renderFrequencies,
+  renderGrid,
+  blurredFbo,
+  renderToBlurredFBO
 
-const getFrameBuffer = (width, height) => (
+const getFrameBuffer = (width, height) =>
   regl.framebuffer({
     color: regl.texture({
       shape: [width, height, 4]
@@ -40,7 +51,6 @@ const getFrameBuffer = (width, height) => (
     depth: false,
     stencil: false
   })
-)
 
 const fbo = getFrameBuffer(512, 512)
 const freqMapFBO = getFrameBuffer(512, 512)
@@ -52,7 +62,16 @@ const renderBloom = createRenderBloom(regl, canvas)
 const renderBlur = createRenderBlur(regl)
 
 const tracks = [
-  { title: '#1', artist: 'fievresdusamedisoir', path: 'src/audio/fievresdusamedisoir.mp3' }
+  {
+    title: '#1',
+    artist: 'fievresdusamedisoir',
+    path: 'src/audio/fievresdusamedisoir.mp3'
+  },
+  {
+    title: '#2',
+    artist: 'fievresdusamedisoir',
+    path: 'src/audio/fievresdusamedisoir.mp3'
+  }
   // {title: '715 - CRΣΣKS', artist: 'Bon Iver', path: 'src/audio/715-creeks.mp3'},
   // {title: 'Another New World', artist: 'Punch Brothers', path: 'src/audio/another-new-world.mp3'},
   // {title: 'The Wilder Sun', artist: 'Jon Hopkins', path: 'src/audio/the-wilder-sun.mp3'},
@@ -61,9 +80,13 @@ const tracks = [
 ]
 
 const audio = createPlayer(tracks[0].path)
+
 audio.on('load', function () {
   window.audio = audio
-  analyser = createAnalyser(audio.node, audio.context, { audible: true, stereo: false })
+  analyser = createAnalyser(audio.node, audio.context, {
+    audible: true,
+    stereo: true
+  })
   const audioControls = createAudioControls(audio.element, tracks)
 
   function loop () {
@@ -84,8 +107,9 @@ audio.on('load', function () {
   const renderLoop = startLoop()
   setTimeout(renderLoop.cancel.bind(renderLoop), 1000)
 
-  titleCard.show()
-    .then(() => new Promise(resolve => setTimeout(resolve, 1000)))
+  titleCard
+    .show()
+    .then(() => new Promise((resolve) => setTimeout(resolve, 1000)))
     .then(() => {
       css(audioControls.el, {
         transition: 'opacity 1s linear',
@@ -167,10 +191,7 @@ function setup () {
   for (let q = 0; q < frequenciesCount; q += settings.connectedBinsStride) {
     const mag = Math.pow(rand(), 1 - q / frequenciesCount) * 0.9
     const rads = rand() * Math.PI * 2
-    const position = [
-      Math.cos(rads) * mag,
-      Math.sin(rads) * mag
-    ]
+    const position = [Math.cos(rads) * mag, Math.sin(rads) * mag]
     const id = points.length
     const point = createPoint(id, position)
     point.frequencyBin = q
@@ -187,7 +208,11 @@ function setup () {
       position: position,
       id: id,
       neighbors: new Set(), // gonna fill this up with the results of delaunay
-      spring: createSpring(settings.dampening * settings.stiffness, settings.stiffness, 0)
+      spring: createSpring(
+        settings.dampening * settings.stiffness,
+        settings.stiffness,
+        0
+      )
     }
   }
 
@@ -205,8 +230,11 @@ function setup () {
     points[pt3].neighbors.add(pt2)
   }
 
-  points.forEach(pt => {
-    pt.neighbors = shuffle(Array.from(pt.neighbors)).slice(0, settings.connectedNeighbors)
+  points.forEach((pt) => {
+    pt.neighbors = shuffle(Array.from(pt.neighbors)).slice(
+      0,
+      settings.connectedNeighbors
+    )
   })
 
   positions = new Float32Array(delaunay.triangles.length * 3)
@@ -241,7 +269,7 @@ function setup () {
 
 function update () {
   const frequencies = analyser.frequencies()
-  points.forEach(pt => {
+  points.forEach((pt) => {
     let value = 0
     if (pt.frequencyBin || pt.frequencyBin === 0) {
       value = Math.pow(frequencies[pt.frequencyBin] / 255, settings.freqPow) // max bin value
@@ -250,7 +278,9 @@ function update () {
     const neighborSum = neighbors.reduce((total, ptID) => {
       return total + points[ptID].spring.tick(1, false)
     }, 0)
-    const neighborAverage = neighbors.length ? neighborSum / neighbors.length : 0
+    const neighborAverage = neighbors.length
+      ? neighborSum / neighbors.length
+      : 0
     value = Math.max(value, neighborAverage * settings.neighborWeight)
 
     pt.spring.updateValue(value)
@@ -270,13 +300,14 @@ function update () {
 
 const renderGlobals = regl({
   uniforms: {
-    projection: ({ viewportWidth, viewportHeight }) => mat4.perspective(
-      [],
-      Math.PI / 4,
-      viewportWidth / viewportHeight,
-      0.01,
-      1000
-    ),
+    projection: ({ viewportWidth, viewportHeight }) =>
+      mat4.perspective(
+        [],
+        Math.PI / 4,
+        viewportWidth / viewportHeight,
+        0.01,
+        1000
+      ),
     view: () => camera.getMatrix(),
     time: ({ time }) => time
   }
@@ -314,11 +345,7 @@ const renderColoredQuad = regl({
     color: regl.prop('color')
   },
   attributes: {
-    position: [
-      -1, -1,
-      -1, 4,
-      4, -1
-    ]
+    position: [-1, -1, -1, 4, 4, -1]
   },
   count: 3,
   primitive: 'triangles'
@@ -346,7 +373,9 @@ function startLoop () {
       if (settings.motionBlur) {
         // renderColoredQuad({ color: [0.18, 0.18, 0.18, settings.motionBlurAmount] })
         // renderColoredQuad({ color: [0.08, 0.08, 0.08, settings.motionBlurAmount] })
-        renderColoredQuad({ color: [0.0, 0.0, 0.0, settings.motionBlurAmount] })
+        renderColoredQuad({
+          color: [0.0, 0.0, 0.0, settings.motionBlurAmount]
+        })
       } else {
         regl.clear({
           // color: [0.18, 0.18, 0.18, 1],
