@@ -63,14 +63,14 @@ const renderBlur = createRenderBlur(regl)
 
 const tracks = [
   {
-    title: '#1',
-    artist: 'fievresdusamedisoir',
-    path: 'src/audio/fievresdusamedisoir.mp3'
-  },
-  {
     title: '#2',
     artist: 'fievresdusamedisoir',
     path: 'src/audio/fievresdusamedisoir2.mp3'
+  },
+  {
+    title: '#1',
+    artist: 'fievresdusamedisoir',
+    path: 'src/audio/fievresdusamedisoir.mp3'
   }
   // {title: '715 - CRΣΣKS', artist: 'Bon Iver', path: 'src/audio/715-creeks.mp3'},
   // {title: 'Another New World', artist: 'Punch Brothers', path: 'src/audio/another-new-world.mp3'},
