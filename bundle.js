@@ -266,27 +266,60 @@ function ViewController(controllers, mode) {
 
 var proto = ViewController.prototype
 
-var COMMON_METHODS = [
-  ['flush', 1],
-  ['idle', 1],
-  ['lookAt', 4],
-  ['rotate', 4],
-  ['pan', 4],
-  ['translate', 4],
-  ['setMatrix', 2],
-  ['setDistanceLimits', 2],
-  ['setDistance', 2]
-]
-
-COMMON_METHODS.forEach(function(method) {
-  var name = method[0]
-  var argNames = []
-  for(var i=0; i<method[1]; ++i) {
-    argNames.push('a'+i)
+proto.flush = function(a0) {
+  var cc = this._controllerList
+  for (var i = 0; i < cc.length; ++i) {
+    cc[i].flush(a0)
   }
-  var code = 'var cc=this._controllerList;for(var i=0;i<cc.length;++i){cc[i].'+method[0]+'('+argNames.join()+')}'
-  proto[name] = Function.apply(null, argNames.concat(code))
-})
+}
+proto.idle = function(a0) {
+  var cc = this._controllerList
+  for (var i = 0; i < cc.length; ++i) {
+    cc[i].idle(a0)
+  }
+}
+proto.lookAt = function(a0, a1, a2, a3) {
+  var cc = this._controllerList
+  for (var i = 0; i < cc.length; ++i) {
+    cc[i].lookAt(a0, a1, a2, a3)
+  }
+}
+proto.rotate = function(a0, a1, a2, a3) {
+  var cc = this._controllerList
+  for (var i = 0; i < cc.length; ++i) {
+    cc[i].rotate(a0, a1, a2, a3)
+  }
+}
+proto.pan = function(a0, a1, a2, a3) {
+  var cc = this._controllerList
+  for (var i = 0; i < cc.length; ++i) {
+    cc[i].pan(a0, a1, a2, a3)
+  }
+}
+proto.translate = function(a0, a1, a2, a3) {
+  var cc = this._controllerList
+  for (var i = 0; i < cc.length; ++i) {
+    cc[i].translate(a0, a1, a2, a3)
+  }
+}
+proto.setMatrix = function(a0, a1) {
+  var cc = this._controllerList
+  for (var i = 0; i < cc.length; ++i) {
+    cc[i].setMatrix(a0, a1)
+  }
+}
+proto.setDistanceLimits = function(a0, a1) {
+  var cc = this._controllerList
+  for (var i = 0; i < cc.length; ++i) {
+    cc[i].setDistanceLimits(a0, a1)
+  }
+}
+proto.setDistance = function(a0, a1) {
+  var cc = this._controllerList
+  for (var i = 0; i < cc.length; ++i) {
+    cc[i].setDistance(a0, a1)
+  }
+}
 
 proto.recalcMatrix = function(t) {
   this._active.recalcMatrix(t)
@@ -317,7 +350,7 @@ proto.setMode = function(mode) {
 
   prev.recalcMatrix(lastT)
   next.setMatrix(lastT, prev.computedMatrix)
-  
+
   this._active = next
   this._mode   = mode
 
@@ -515,63 +548,71 @@ module.exports = function(name, value) {
 },{}],5:[function(require,module,exports){
 "use strict"
 
-function compileSearch(funcName, predicate, reversed, extraArgs, useNdarray, earlyOut) {
-  var code = [
-    "function ", funcName, "(a,l,h,", extraArgs.join(","),  "){",
-earlyOut ? "" : "var i=", (reversed ? "l-1" : "h+1"),
-";while(l<=h){\
-var m=(l+h)>>>1,x=a", useNdarray ? ".get(m)" : "[m]"]
-  if(earlyOut) {
-    if(predicate.indexOf("c") < 0) {
-      code.push(";if(x===y){return m}else if(x<=y){")
-    } else {
-      code.push(";var p=c(x,y);if(p===0){return m}else if(p<=0){")
-    }
-  } else {
-    code.push(";if(", predicate, "){i=m;")
-  }
-  if(reversed) {
-    code.push("l=m+1}else{h=m-1}")
-  } else {
-    code.push("h=m-1}else{l=m+1}")
-  }
-  code.push("}")
-  if(earlyOut) {
-    code.push("return -1};")
-  } else {
-    code.push("return i};")
-  }
-  return code.join("")
-}
+// (a, y, c, l, h) = (array, y[, cmp, lo, hi])
 
-function compileBoundsSearch(predicate, reversed, suffix, earlyOut) {
-  var result = new Function([
-  compileSearch("A", "x" + predicate + "y", reversed, ["y"], false, earlyOut),
-  compileSearch("B", "x" + predicate + "y", reversed, ["y"], true, earlyOut),
-  compileSearch("P", "c(x,y)" + predicate + "0", reversed, ["y", "c"], false, earlyOut),
-  compileSearch("Q", "c(x,y)" + predicate + "0", reversed, ["y", "c"], true, earlyOut),
-"function dispatchBsearch", suffix, "(a,y,c,l,h){\
-if(a.shape){\
-if(typeof(c)==='function'){\
-return Q(a,(l===undefined)?0:l|0,(h===undefined)?a.shape[0]-1:h|0,y,c)\
-}else{\
-return B(a,(c===undefined)?0:c|0,(l===undefined)?a.shape[0]-1:l|0,y)\
-}}else{\
-if(typeof(c)==='function'){\
-return P(a,(l===undefined)?0:l|0,(h===undefined)?a.length-1:h|0,y,c)\
-}else{\
-return A(a,(c===undefined)?0:c|0,(l===undefined)?a.length-1:l|0,y)\
-}}}\
-return dispatchBsearch", suffix].join(""))
-  return result()
+function ge(a, y, c, l, h) {
+  var i = h + 1;
+  while (l <= h) {
+    var m = (l + h) >>> 1, x = a[m];
+    var p = (c !== undefined) ? c(x, y) : (x - y);
+    if (p >= 0) { i = m; h = m - 1 } else { l = m + 1 }
+  }
+  return i;
+};
+
+function gt(a, y, c, l, h) {
+  var i = h + 1;
+  while (l <= h) {
+    var m = (l + h) >>> 1, x = a[m];
+    var p = (c !== undefined) ? c(x, y) : (x - y);
+    if (p > 0) { i = m; h = m - 1 } else { l = m + 1 }
+  }
+  return i;
+};
+
+function lt(a, y, c, l, h) {
+  var i = l - 1;
+  while (l <= h) {
+    var m = (l + h) >>> 1, x = a[m];
+    var p = (c !== undefined) ? c(x, y) : (x - y);
+    if (p < 0) { i = m; l = m + 1 } else { h = m - 1 }
+  }
+  return i;
+};
+
+function le(a, y, c, l, h) {
+  var i = l - 1;
+  while (l <= h) {
+    var m = (l + h) >>> 1, x = a[m];
+    var p = (c !== undefined) ? c(x, y) : (x - y);
+    if (p <= 0) { i = m; l = m + 1 } else { h = m - 1 }
+  }
+  return i;
+};
+
+function eq(a, y, c, l, h) {
+  while (l <= h) {
+    var m = (l + h) >>> 1, x = a[m];
+    var p = (c !== undefined) ? c(x, y) : (x - y);
+    if (p === 0) { return m }
+    if (p <= 0) { l = m + 1 } else { h = m - 1 }
+  }
+  return -1;
+};
+
+function norm(a, y, c, l, h, f) {
+  if (typeof c === 'function') {
+    return f(a, y, c, (l === undefined) ? 0 : l | 0, (h === undefined) ? a.length - 1 : h | 0);
+  }
+  return f(a, y, undefined, (c === undefined) ? 0 : c | 0, (l === undefined) ? a.length - 1 : l | 0);
 }
 
 module.exports = {
-  ge: compileBoundsSearch(">=", false, "GE"),
-  gt: compileBoundsSearch(">", false, "GT"),
-  lt: compileBoundsSearch("<", true, "LT"),
-  le: compileBoundsSearch("<=", true, "LE"),
-  eq: compileBoundsSearch("-", true, "EQ", true)
+  ge: function(a, y, c, l, h) { return norm(a, y, c, l, h, ge)},
+  gt: function(a, y, c, l, h) { return norm(a, y, c, l, h, gt)},
+  lt: function(a, y, c, l, h) { return norm(a, y, c, l, h, lt)},
+  le: function(a, y, c, l, h) { return norm(a, y, c, l, h, le)},
+  eq: function(a, y, c, l, h) { return norm(a, y, c, l, h, eq)}
 }
 
 },{}],6:[function(require,module,exports){
@@ -11669,6 +11710,11 @@ const renderBloom = createRenderBloom(regl, canvas)
 const renderBlur = createRenderBlur(regl)
 
 const tracks = [
+  {
+    title: '#3',
+    artist: 'fievresdusamedisoir',
+    path: 'src/audio/fievresdusamedisoir3.mp3'
+  },
   {
     title: '#2',
     artist: 'fievresdusamedisoir',

@@ -63,6 +63,11 @@ const renderBlur = createRenderBlur(regl)
 
 const tracks = [
   {
+    title: '#3',
+    artist: 'fievresdusamedisoir',
+    path: 'src/audio/fievresdusamedisoir3.mp3'
+  },
+  {
     title: '#2',
     artist: 'fievresdusamedisoir',
     path: 'src/audio/fievresdusamedisoir2.mp3'
