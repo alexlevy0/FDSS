@@ -18,6 +18,8 @@ const settings = {
   // precision: 0.8,
   lineOpacity: 0.5,
   autoEnterDelay: 3000, // ms before entering without a click
+  exitFade: 2000, // ms for the title to fade out over the incoming scene
+  exitTrail: 40, // frames the lines keep growing after entering, then freeze
   turnGranularity: 12,
   startSpreadMultiplier: 0.35,
   particleDieRate: 0,
@@ -35,6 +37,7 @@ window.addEventListener('resize', resize)
 const instructions = container.querySelector('.instructions')
 const button = container.querySelector('button')
 let rand, points, pixelPicker, rAFToken, start, isFading
+let exitFrames = 0
 
 export default function createTitleCard () {
   return {
@@ -42,16 +45,16 @@ export default function createTitleCard () {
       if (isFading) return
       start = Date.now()
       resize()
-      setup()
-      loop()
+      if (safeSetup()) loop()
     },
     show: function () {
       start = Date.now()
       setTimeout(() => {
         css(instructions, { opacity: 1 })
       }, 300)
-      setup()
-      loop()
+      // a failed setup (zero-size viewport...) must not block entering:
+      // the auto-enter timer below still resolves, and a resize retries
+      if (safeSetup()) loop()
       return new Promise((resolve) => {
         let entered = false
         function enter () {
@@ -72,26 +75,52 @@ export default function createTitleCard () {
     }
   }
 
+  // The scene is already fading in underneath (index.js `intro`), so this is
+  // a crossfade: the particles scatter (activateDrawers) and the canvas fades
+  // with an ease-in, staying visible while they fly and gone by the time the
+  // grid is fully up. Pointer events are released right away so the scene
+  // (camera controls) is usable during the fade.
   function remove () {
     isFading = true
-    css(canvas, {
-      transition: 'opacity 1500ms linear',
+    const fadeMs = settings.exitFade
+    css(container, { pointerEvents: 'none' })
+    css(instructions, {
+      transition: 'opacity 400ms ease-out',
       opacity: 0
     })
-    // css(instructions, { opacity: 0 })
+    css(canvas, {
+      transition: `opacity ${fadeMs}ms cubic-bezier(0.55, 0, 0.75, 0.6)`,
+      opacity: 0
+    })
     setTimeout(() => {
       window.removeEventListener('resize', resize)
       window.cancelAnimationFrame(rAFToken)
-      container.parentElement.removeChild(container)
-    }, 1700)
+      if (container.parentElement) container.parentElement.removeChild(container)
+    }, fadeMs + 200)
   }
 
   function loop () {
+    if (!points) return
     if (!isFading && (Date.now() - start) > 30000) return
+    // Once entered, the lines grow for a short flourish and then freeze:
+    // the canvas keeps its last frame while its CSS opacity fades, so this
+    // 2D loop stops competing with the first WebGL frames.
+    if (isFading && exitFrames++ > settings.exitTrail) return
     window.cancelAnimationFrame(rAFToken)
     rAFToken = window.requestAnimationFrame(loop)
     update()
     draw()
+  }
+
+  function safeSetup () {
+    try {
+      setup()
+      return true
+    } catch (err) {
+      console.warn('title card setup failed', err)
+      points = null
+      return false
+    }
   }
 
   function setup () {
@@ -117,8 +146,7 @@ export default function createTitleCard () {
   function update () {
     points.forEach((p) => {
       if (!p.isActive) return
-      const color = pixelPicker(p.x, p.y)
-      const averageVal = getAveragePixelVal(color)
+      const averageVal = pixelPicker(p.x, p.y)
       const isOnActivePixel = p.line.length || averageVal < settings.colorThreshold
 
       if (isOnActivePixel) {
@@ -153,20 +181,20 @@ export default function createTitleCard () {
 
   function updateNextAngle (p, pixelPicker) {
     const angle = p.angle.tick(1, false)
-    const currentPixelVal = getAveragePixelVal(pixelPicker(p.x, p.y))
+    const currentPixelVal = pixelPicker(p.x, p.y)
     for (let i = 0; i <= settings.turnGranularity; i += 1) {
       const t = i / settings.turnGranularity * Math.PI
       let velX = Math.cos(angle + t) * p.speed
       let velY = Math.sin(angle + t) * p.speed
       let pixel = pixelPicker(p.x + velX, p.y + velY)
-      if (getAveragePixelVal(pixel) < currentPixelVal) {
+      if (pixel < currentPixelVal) {
         p.angle.updateValue(angle + t)
         break
       }
       velX = Math.cos(angle - t) * p.speed
       velY = Math.sin(angle - t) * p.speed
       pixel = pixelPicker(p.x + velX, p.y + velY)
-      if (getAveragePixelVal(pixel) < currentPixelVal) {
+      if (pixel < currentPixelVal) {
         p.angle.updateValue(angle - t)
         break
       }
@@ -174,6 +202,7 @@ export default function createTitleCard () {
   }
 
   function activateDrawers () {
+    if (!points) return
     settings.precision = 0.4
     points.forEach((p) => {
       p.isActive = true
@@ -199,32 +228,33 @@ export default function createTitleCard () {
 
     ctx.beginPath()
     ctx.strokeStyle = `rgba(255, 255, 255, ${settings.lineOpacity})`
-    points.forEach((p) => {
-      if (p.line.length > 1) {
-        ctx.moveTo(p.line[0][0], p.line[0][1])
-        p.line.slice(1).forEach(pt => {
-          ctx.lineTo(pt[0], pt[1])
-        })
+    for (let k = 0; k < points.length; k++) {
+      const line = points[k].line
+      if (line.length > 1) {
+        ctx.moveTo(line[0][0], line[0][1])
+        for (let j = 1; j < line.length; j++) ctx.lineTo(line[j][0], line[j][1])
       }
-    })
+    }
     ctx.stroke()
   }
 }
 
 // ---------
 
-function getAveragePixelVal (pixel) {
-  return (pixel.r + pixel.g + pixel.b) / 3
-}
-
 function getSource () {
   const hiddenCanvas = container.appendChild(document.createElement('canvas'))
   const hiddenCtx = hiddenCanvas.getContext('2d')
   fit(hiddenCanvas)
   hiddenCanvas.style.display = 'none'
+  if (!hiddenCanvas.width || !hiddenCanvas.height) {
+    // zero-size viewport (collapsed pane, hidden iframe): getImageData would
+    // throw. Return an all-white source (no text); a resize rebuilds it.
+    hiddenCanvas.parentElement.removeChild(hiddenCanvas)
+    return () => 255
+  }
   hiddenCtx.fillStyle = 'rgb(255, 255, 255)'
   hiddenCtx.fillRect(0, 0, hiddenCanvas.width, hiddenCanvas.height)
-  printText(hiddenCtx, settings.text, Math.min(hiddenCanvas.width, hiddenCanvas.height) * 0.07)
+  printText(hiddenCtx, settings.text, titleSize(hiddenCtx))
   const picker = makePixelPicker(hiddenCanvas)
   hiddenCanvas.parentElement.removeChild(hiddenCanvas)
   return picker
@@ -234,17 +264,26 @@ function makePixelPicker (canvas) {
   const imageData = canvas.getContext('2d').getImageData(
     0, 0, canvas.width, canvas.height
   )
+  const data = imageData.data
+  const width = imageData.width
+  // average of r, g, b at (x, y), without allocating (called ~28 times per
+  // particle per frame); NaN outside the image, as before
   return (x, y) => {
-    x = x | 0
-    y = y | 0
-    const i = 4 * (x + y * imageData.width)
-    return {
-      r: imageData.data[i],
-      g: imageData.data[i + 1],
-      b: imageData.data[i + 2],
-      a: imageData.data[i + 3]
-    }
+    const i = 4 * ((x | 0) + (y | 0) * width)
+    return (data[i] + data[i + 1] + data[i + 2]) / 3
   }
+}
+
+// 7% of the short side, as before, but never wider than 88% of the canvas:
+// with the viewport meta a portrait phone is ~390px wide, where the old size
+// rule could push the long title past the edges.
+function titleSize (context) {
+  const { width, height } = context.canvas
+  let size = Math.min(width, height) * 0.07
+  context.font = `${size}px "Open Sans"`
+  const textWidth = context.measureText(settings.text).width
+  if (textWidth > width * 0.88 && textWidth > 0) size *= (width * 0.88) / textWidth
+  return Math.max(1, size)
 }
 
 function printText (context, text, size) {

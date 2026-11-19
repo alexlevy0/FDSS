@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="en" dir="ltr">
+<html lang="fr" dir="ltr">
 
 <head>
   <title>Fièvres du Samedi Soir</title>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="description" content="Fievres du Samedi Soir">
   <!-- Chrome, Firefox OS and Opera -->
   <meta name="theme-color" content="#000000">
@@ -28,209 +29,389 @@
       font-display: swap;
     }
 
+    :root {
+      --ink: #ececec;
+      --ink-dim: rgba(236, 236, 236, 0.55);
+      --ink-faint: rgba(236, 236, 236, 0.22);
+      --gutter: clamp(1rem, 3.5vw, 2.25rem);
+      --tap: 44px;
+      --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
     html,
     body {
-      color: #e2e2e2;
-      background-color: rgb(0, 0, 0);
-      font-family: 'Open Sans', sans-serif;
+      color: var(--ink);
+      background-color: #000;
+      font-family: 'Open Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
       -webkit-font-smoothing: antialiased;
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
       margin: 0;
       padding: 0;
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
     }
+
+    /* the 3D controls own every gesture on the scene (no page pinch/scroll) */
+    canvas.viz {
+      display: block;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* auto-hide: no cursor while the player is hidden */
+    body.ui-idle,
+    body.ui-idle * {
+      cursor: none !important;
+    }
+
+    /* ---------- title card ---------- */
 
     .title-card-container {
-      position: absolute;
-      height: 100vh;
-      width: 100vw;
-      top: 0;
-      left: 0;
+      position: fixed;
+      inset: 0;
       z-index: 8;
-    }
-
-    .turnup {
-      font-size: 150px;
     }
 
     .instructions {
       opacity: 0;
       transition: opacity 1000ms linear;
-      color: rgba(230, 230, 230, 0.466);
       position: absolute;
-      top: 5%;
-      text-align: center;
-      width: 100vw;
-      font-size: 35px;
-      letter-spacing: 8px;
+      top: max(5%, env(safe-area-inset-top));
+      left: 0;
+      right: 0;
+      display: flex;
+      justify-content: center;
     }
 
     .instructions button {
-      color: rgb(230, 230, 230);
-      /* padding: 25px 50px; */
-      transition: background-color 150ms linear;
-      background-color: rgba(0, 0, 0);
-      border: 0px solid rgb(70, 70, 70);
+      min-width: var(--tap);
+      min-height: var(--tap);
+      padding: 0.25em 0.45em;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--ink);
+      font: inherit;
+      font-size: clamp(2.25rem, 7vw, 4.25rem);
+      line-height: 1;
       cursor: pointer;
-      font-size: 75px;
-      letter-spacing: 3px;
-      outline: 0;
-      font-family: inherit;
+      transition: background-color 150ms linear;
+      -webkit-tap-highlight-color: transparent;
     }
 
     .instructions button:hover {
-      background-color: rgba(70, 70, 70, 1);
+      background-color: rgba(255, 255, 255, 0.08);
     }
 
-    .ios-instructions {
-      display: none;
-      text-align: center;
-      margin: 5vh auto 0;
-      width: 70vw;
+    .instructions button:focus-visible {
+      outline: 1px solid var(--ink-dim);
+      outline-offset: 4px;
     }
 
-    .ios-instructions h2 {
-      font-size: 28px;
-      font-weight: 800;
-    }
-
-    .ios-instructions video {
-      width: 100%;
-    }
+    /* ---------- player ---------- */
 
     .controls-container {
-      opacity: 0;
-      width: 100%;
-      padding-top: 20px;
-      position: relative;
-      background-color: rgba(60, 60, 60, 0.05);
-      z-index: 9;
-      position: absolute;
+      position: fixed;
+      left: 0;
+      right: 0;
       bottom: 0;
+      z-index: 9;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      /* the idle fade; the first appearance uses the intro timing (JS) */
+      transition: opacity 700ms ease, visibility 0s linear 700ms;
+      padding: clamp(2.5rem, 9vh, 5rem) var(--gutter) max(clamp(0.5rem, 2vh, 1.25rem), env(safe-area-inset-bottom));
+      padding-left: max(var(--gutter), env(safe-area-inset-left));
+      padding-right: max(var(--gutter), env(safe-area-inset-right));
+      background: linear-gradient(to top,
+          rgba(0, 0, 0, 0.72) 0%,
+          rgba(0, 0, 0, 0.45) 45%,
+          rgba(0, 0, 0, 0) 100%);
+      font-size: clamp(0.8125rem, 0.75rem + 0.25vw, 0.9375rem);
+      line-height: 1.35;
+      letter-spacing: 0.02em;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
     }
 
-    .controls-header {
-      padding: 20px 25px;
-      font-weight: 200;
-      font-size: 50px;
-      color: #eee;
-      position: relative;
+    .controls-container.is-visible {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 250ms ease, visibility 0s;
     }
 
-    .github-link {
-      position: absolute;
-      fill: #888;
-      right: 20px;
-      transition: fill 200ms linear;
-      top: 0px;
-      font-size: 40px;
-      cursor: pointer;
+    .controls-container.is-visible:not(.is-idle) {
+      pointer-events: auto;
     }
 
-    .github-link:hover {
-      fill: #eee;
+    .controls-container.is-visible.is-idle {
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 900ms ease, visibility 0s linear 900ms;
     }
 
-    .insta {
-      position: absolute;
-      fill: #1e2021;
-      top: -115px;
-      left: 20px;
-      transition: fill 200ms linear;
-      opacity: 0.1;
-      font-size: 120px;
+    .player {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+      grid-template-areas:
+        "seek seek seek seek seek"
+        "play meta tracks time link";
+      align-items: center;
+      column-gap: clamp(0.5rem, 2vw, 1.5rem);
+      max-width: 90rem;
+      margin: 0 auto;
     }
 
-    .insta:hover {
-      fill: #eee;
+    .player button,
+    .player a {
+      font: inherit;
+      color: inherit;
+      -webkit-tap-highlight-color: transparent;
     }
 
-    .artist {
-      font-size: 20px;
-      text-transform: uppercase;
-      color: #aaa;
+    .player :focus-visible {
+      outline: 1px solid var(--ink-dim);
+      outline-offset: 2px;
+      border-radius: 4px;
     }
 
-    .elapsed-time {
-      position: absolute;
-      bottom: 20px;
-      right: 25px;
-      font-weight: 200;
-      font-size: 40px;
-      color: #eee;
-    }
-
+    /* seek bar: a hairline with a 44px hit area */
     .seeker {
-      height: 20px;
-      width: 100%;
-      background-color: rgba(90, 90, 90, 0.9);
-      cursor: pointer;
+      grid-area: seek;
       position: relative;
+      height: var(--tap);
+      margin: 0 0 -0.25rem;
+      cursor: pointer;
+      touch-action: none;
+    }
+
+    .seeker-track {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      height: 1px;
+      transform: translateY(-50%);
+      background: var(--ink-faint);
+      transition: height 150ms ease;
+    }
+
+    .seeker:hover .seeker-track,
+    .seeker.is-dragging .seeker-track,
+    .seeker:focus-visible .seeker-track {
+      height: 3px;
+    }
+
+    .seeker:focus-visible {
+      outline: none;
     }
 
     .progress {
-      height: 100%;
       position: absolute;
       top: 0;
-      left: -1px;
-      background-color: #eee;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      background: var(--ink);
+      transform-origin: 0 50%;
+      transform: scaleX(0);
     }
 
-    .track-selector {
-      margin: 0 0 20px 0;
-      position: relative;
-      z-index: 10;
-      cursor: pointer;
-      list-style: none;
-      padding: 0;
+    .seeker-thumb {
+      position: absolute;
+      top: 50%;
+      left: 0;
+      width: 9px;
+      height: 9px;
+      margin: -4.5px 0 0 -4.5px;
+      border-radius: 50%;
+      background: var(--ink);
+      opacity: 0;
+      transition: opacity 150ms ease;
+      pointer-events: none;
     }
 
-    .track {
-      margin: 10px 0 10px 25px;
-      position: relative;
-      font-size: 30px;
-      transition: color 200ms linear;
-      color: #888;
-    }
-
-    .track span {
-      margin-right: 15px;
-    }
-
-    .track:hover {
-      color: #bbb;
-    }
-
-    .track.selected {
-      color: #eee;
-    }
-
-    .hint {
-      display: none;
-      padding: 20px;
-      font-size: 12px;
-      font-weight: 800;
-      text-align: center;
-      border-top: 1px solid rgb(70, 70, 70);
-      color: #aaa;
-    }
-
-    .lil-gui.root {
-      --width: 100%;
-      --font-size: 15px;
-      --widget-height: 28px;
-      top: 0;
-      right: 0;
+    .seeker:hover .seeker-thumb,
+    .seeker.is-dragging .seeker-thumb,
+    .seeker:focus-visible .seeker-thumb {
+      opacity: 1;
     }
 
     .play-pause {
-      background: none;
-      border: 0;
+      grid-area: play;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: var(--tap);
+      height: var(--tap);
+      margin-left: -10px;
       padding: 0;
-      font: inherit;
-      color: inherit;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      cursor: pointer;
+      transition: background-color 150ms ease;
     }
 
-    .insta {
+    .play-pause:hover {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .play-pause svg {
+      width: 18px;
+      height: 18px;
+      fill: currentColor;
+    }
+
+    .play-pause .icon-pause,
+    .play-pause.is-playing .icon-play {
+      display: none;
+    }
+
+    .play-pause.is-playing .icon-pause {
+      display: block;
+    }
+
+    .now-playing {
+      grid-area: meta;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .now-playing .title {
+      display: inline;
+      font-size: 1.15em;
+    }
+
+    .now-playing .artist {
+      display: inline;
+      margin-left: 0.75em;
+      font-size: 0.78em;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--ink-dim);
+    }
+
+    .track-selector {
+      grid-area: tracks;
+      display: flex;
+      gap: 0.125rem;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .track button {
+      min-width: var(--tap);
+      min-height: var(--tap);
+      padding: 0 0.6em;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--ink-dim);
+      cursor: pointer;
+      font-variant-numeric: tabular-nums;
+      transition: color 200ms ease, background-color 200ms ease;
+    }
+
+    .track button:hover {
+      color: var(--ink);
+    }
+
+    .track.selected button {
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .elapsed-time {
+      grid-area: time;
+      color: var(--ink-dim);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .elapsed-time .current {
+      color: var(--ink);
+    }
+
+    .instagram-link {
+      grid-area: link;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: var(--tap);
+      height: var(--tap);
+      margin-right: -10px;
+      border-radius: 50%;
+      font-size: 1.25rem;
+      line-height: 1;
       text-decoration: none;
+      opacity: 0.45;
+      filter: grayscale(1);
+      transition: opacity 200ms ease, filter 200ms ease;
+    }
+
+    .instagram-link:hover,
+    .instagram-link:focus-visible {
+      opacity: 1;
+      filter: none;
+    }
+
+    /* phones: tracks on their own line below */
+    @media (max-width: 40rem) {
+      .player {
+        grid-template-columns: auto minmax(0, 1fr) auto auto;
+        grid-template-areas:
+          "seek seek seek seek"
+          "play meta time link"
+          "tracks tracks tracks tracks";
+      }
+
+      .now-playing .artist {
+        display: block;
+        margin-left: 0;
+      }
+
+      .track-selector {
+        margin-left: -0.6em;
+      }
+    }
+
+    /* ---------- tweak panel (hidden; toggled with G) ---------- */
+
+    .lil-gui.root,
+    .lil-gui.root.autoPlace {
+      --width: min(17.5rem, calc(100vw - 2rem));
+      --font-size: 11px;
+      --input-font-size: 11px;
+      --widget-height: 20px;
+      --padding: 4px;
+      --spacing: 4px;
+      position: fixed;
+      top: max(0.75rem, env(safe-area-inset-top));
+      right: max(0.75rem, env(safe-area-inset-right));
+      max-height: calc(100% - 1.5rem - 9rem);
+      overflow-y: auto;
+      z-index: 11;
+      border-radius: 6px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+
+      .instructions,
+      .controls-container,
+      .controls-container.is-visible,
+      .controls-container.is-visible.is-idle,
+      .seeker-track,
+      .seeker-thumb {
+        transition: none !important;
+      }
     }
   </style>
   <!-- Global site tag (gtag.js) - Google Analytics -->
@@ -245,27 +426,43 @@
 </head>
 
 <body>
-  <canvas class="viz"></canvas>
+  <canvas class="viz" aria-label="Visualisation audio réactive" role="img"></canvas>
   <div class="title-card-container">
-    <canvas></canvas>
+    <canvas aria-hidden="true"></canvas>
     <div class="instructions">
-      <!-- <div class="turnup">🔈🔉🔊</div> -->
       <button type="button" aria-label="Lancer la musique">🔊</button>
     </div>
   </div>
-  <div class="controls-container">
-    <div class="controls-header">
-      <button type="button" class="github-link play-pause" aria-label="Lecture / pause">⏯️</button>
-      <a href="https://www.instagram.com/alexlevy0/" target="_blank" rel="noopener" class="insta" aria-label="Instagram">🕴</a>
-      <div class="title"></div>
-      <div class="artist"></div>
-      <div class="elapsed-time"></div>
+  <section class="controls-container" aria-label="Lecteur audio">
+    <div class="player">
+      <div class="seeker" role="slider" tabindex="0" aria-label="Position dans le morceau"
+        aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00">
+        <div class="seeker-track">
+          <div class="progress"></div>
+        </div>
+        <div class="seeker-thumb"></div>
+      </div>
+      <button type="button" class="play-pause" aria-label="Lecture">
+        <svg class="icon-play" viewBox="0 0 18 18" aria-hidden="true">
+          <path d="M5 3.2v11.6c0 .6.6.9 1.1.6l9.2-5.8c.5-.3.5-.9 0-1.2L6.1 2.6C5.6 2.3 5 2.6 5 3.2z" />
+        </svg>
+        <svg class="icon-pause" viewBox="0 0 18 18" aria-hidden="true">
+          <rect x="4" y="3" width="3.2" height="12" rx="0.8" />
+          <rect x="10.8" y="3" width="3.2" height="12" rx="0.8" />
+        </svg>
+      </button>
+      <div class="now-playing" aria-live="polite">
+        <span class="title"></span>
+        <span class="artist"></span>
+      </div>
+      <ol class="track-selector" aria-label="Mixes"></ol>
+      <div class="elapsed-time" aria-label="Temps écoulé et durée totale">
+        <span class="current">0:00</span> / <span class="total">0:00</span>
+      </div>
+      <a href="https://www.instagram.com/alexlevy0/" target="_blank" rel="noopener" class="instagram-link"
+        aria-label="Instagram (nouvel onglet)">🕴</a>
     </div>
-    <div class="seeker">
-      <div class="progress"></div>
-    </div>
-    <ul class="track-selector"></ul>
-  </div>
+  </section>
   <script type="module" src="/src/index.js"></script>
 </body>
 

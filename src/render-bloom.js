@@ -1,189 +1,246 @@
-// Hash blur, inlined from glsl-hash-blur + glsl-random (MIT),
-// specialised with sample = tex and iterations = 20.
-const hashBlur = `
-      highp float random(vec2 co) {
-        highp float a = 12.9898;
-        highp float b = 78.233;
-        highp float c = 43758.5453;
-        highp float dt = dot(co.xy, vec2(a, b));
-        highp float sn = mod(dt, 3.14);
-        return fract(sin(sn) * c);
-      }
+// Mip-chain bloom (Jimenez, "Next Generation Post Processing in Call of
+// Duty: Advanced Warfare"): a soft-knee luminance threshold, a 13-tap
+// downsample chain and a 9-tap tent upsample that adds each level onto the
+// next finer one.
+//
+// The scene buffer holds display-referred values (what the grid shader
+// writes); the bloom works on their linearised version (pow 2.2) so the glow
+// adds light rather than paint. With HDR buffers (half float / float) the
+// chain stores linear values directly. On the uint8 fallback it stores
+// sqrt(linear), which keeps the darks from banding.
 
-      vec2 mult(inout vec2 r) {
-        r = fract(r * vec2(12.9898, 78.233));
-        return sqrt(r.x + .001) * vec2(sin(r.y * 6.28318530718), cos(r.y * 6.28318530718));
-      }
-
-      vec3 blur(vec2 uv, float radius, float aspect) {
-        vec2 circle = vec2(radius);
-        circle.x *= aspect;
-        vec2 rnd = vec2(random(uv));
-        vec3 acc = vec3(0.0);
-        for (int i = 0; i < 20; i++) {
-          acc += tex(uv + circle * mult(rnd)).xyz;
-        }
-        return acc / 20.0;
-      }
+export const FRAG_PRECISION = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
 `
 
-export default function createRenderBloom (regl, canvas) {
-  // the canvas can still be 0x0 if the page loads before layout (hidden tab)
-  const width = Math.max(1, canvas.width)
-  const height = Math.max(1, canvas.height)
-  const blueTextureBuffer = new Uint8Array(width * height * 4)
-  for (let i = 0; i < blueTextureBuffer.length; i += 4) {
-    const x = i / 4 % width
-    const y = i / 4 / width | 0
-    if (x > 100 && y > 100) {
-      blueTextureBuffer[i] = blueTextureBuffer[i + 1] = 0
-      blueTextureBuffer[i + 2] = blueTextureBuffer[i + 3] = 255
-    } else {
-      blueTextureBuffer[i] = blueTextureBuffer[i + 1] = blueTextureBuffer[i + 2] = Math.random() * 255 | 0
-      blueTextureBuffer[i + 3] = 255
-    }
+export const FULLSCREEN_VERT = `
+precision highp float;
+attribute vec2 position;
+varying vec2 uv;
+void main() {
+  uv = position * 0.5 + 0.5;
+  gl_Position = vec4(position, 0, 1);
+}
+`
+
+export const BLOOM_CODEC = `
+vec3 bloomDecode(vec4 s) {
+#ifdef BLOOM_ENCODED
+  return s.rgb * s.rgb;
+#else
+  return s.rgb;
+#endif
+}
+vec4 bloomEncode(vec3 c) {
+#ifdef BLOOM_ENCODED
+  return vec4(sqrt(clamp(c, 0.0, 1.0)), 1.0);
+#else
+  return vec4(max(c, vec3(0.0)), 1.0);
+#endif
+}
+`
+
+export default function createRenderBloom (regl, { type = 'uint8', hdr = false, levels = 5 } = {}) {
+  const defines = hdr ? '' : '#define BLOOM_ENCODED\n'
+  const position = regl.buffer([-1, -1, -1, 4, 4, -1])
+
+  const makeFbo = () =>
+    regl.framebuffer({
+      color: regl.texture({
+        width: 1,
+        height: 1,
+        type,
+        min: 'linear',
+        mag: 'linear',
+        wrap: 'clamp'
+      }),
+      depth: false,
+      stencil: false
+    })
+
+  // down[i] is 1/2^(i+1) of the source size; up[i] matches down[i]
+  const down = []
+  const up = []
+  for (let i = 0; i < levels; i++) {
+    down.push(makeFbo())
+    if (i < levels - 1) up.push(makeFbo())
   }
-  const tempFbo = regl.framebuffer({
-    color: regl.texture({
-      shape: [width, height, 4],
-      data: blueTextureBuffer
-    }),
-    depth: true,
-    stencil: false
-  })
 
-  const renderBloomBlur = regl({
-    vert: `
-      precision highp float;
+  const downsampleFrag = (prefilter) => `
+    ${prefilter ? '#define PREFILTER' : ''}
+    ${defines}
+    ${FRAG_PRECISION}
+    varying vec2 uv;
+    uniform sampler2D src;
+    uniform vec2 texel; // source texel size
+    uniform float threshold;
+    uniform float knee;
+    ${BLOOM_CODEC}
 
-      attribute vec2 position;
+    vec3 S(vec2 p) {
+    #ifdef PREFILTER
+      return pow(max(texture2D(src, p).rgb, vec3(1e-6)), vec3(2.2));
+    #else
+      return bloomDecode(texture2D(src, p));
+    #endif
+    }
 
-      varying vec2 uv;
+    void main() {
+      vec3 a = S(uv + texel * vec2(-2.0, 2.0));
+      vec3 b = S(uv + texel * vec2(0.0, 2.0));
+      vec3 c = S(uv + texel * vec2(2.0, 2.0));
+      vec3 d = S(uv + texel * vec2(-2.0, 0.0));
+      vec3 e = S(uv);
+      vec3 f = S(uv + texel * vec2(2.0, 0.0));
+      vec3 g = S(uv + texel * vec2(-2.0, -2.0));
+      vec3 h = S(uv + texel * vec2(0.0, -2.0));
+      vec3 i = S(uv + texel * vec2(2.0, -2.0));
+      vec3 j = S(uv + texel * vec2(-1.0, 1.0));
+      vec3 k = S(uv + texel * vec2(1.0, 1.0));
+      vec3 l = S(uv + texel * vec2(-1.0, -1.0));
+      vec3 m = S(uv + texel * vec2(1.0, -1.0));
 
-      void main() {
-        uv = position / 2.0 + 0.5;
-        gl_Position = vec4(position, 0, 1);
-      }
-    `,
+      vec3 col = e * 0.125;
+      col += (a + c + g + i) * 0.03125;
+      col += (b + d + f + h) * 0.0625;
+      col += (j + k + l + m) * 0.125;
+
+    #ifdef PREFILTER
+      // soft-knee threshold on luminance
+      float br = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      float kn = max(knee, 1e-4);
+      float rq = clamp(br - threshold + kn, 0.0, 2.0 * kn);
+      rq = rq * rq / (4.0 * kn);
+      col *= max(rq, br - threshold) / max(br, 1e-4);
+    #endif
+
+      gl_FragColor = bloomEncode(col);
+    }
+  `
+
+  const downCommand = (prefilter) =>
+    regl({
+      vert: FULLSCREEN_VERT,
+      frag: downsampleFrag(prefilter),
+      attributes: { position },
+      uniforms: {
+        src: regl.prop('src'),
+        texel: regl.prop('texel'),
+        threshold: regl.prop('threshold'),
+        knee: regl.prop('knee')
+      },
+      count: 3,
+      depth: { enable: false },
+      blend: { enable: false },
+      framebuffer: regl.prop('fbo')
+    })
+
+  const prefilterPass = downCommand(true)
+  const downPass = downCommand(false)
+
+  const upPass = regl({
+    vert: FULLSCREEN_VERT,
     frag: `
-      precision highp float;
-
+      ${defines}
+      ${FRAG_PRECISION}
       varying vec2 uv;
+      uniform sampler2D low; // coarser level (already upsampled)
+      uniform sampler2D cur; // this level of the downsample chain
+      uniform vec2 texel; // coarser level texel size
+      uniform float scatter;
+      ${BLOOM_CODEC}
 
-      uniform vec2 iResolution;
-      uniform sampler2D iChannel0;
-      uniform float blurMag;
-
-      vec3 tex(vec2 uv);
-
-      ${hashBlur}
-
-      vec3 tex(vec2 uv) {
-        vec3 rgb = texture2D(iChannel0, uv).rgb;
-        return rgb;
-      }
+      vec3 L(vec2 p) { return bloomDecode(texture2D(low, p)); }
 
       void main() {
-        float aspect = iResolution.x / iResolution.y;
-        vec3 blurred = blur(uv, blurMag / 200.0, 1.0 / aspect);
-        gl_FragColor = vec4(blurred, 0.8);
+        // 9-tap tent filter
+        vec3 t = L(uv) * 4.0;
+        t += (L(uv + vec2(texel.x, 0.0)) + L(uv - vec2(texel.x, 0.0)) +
+              L(uv + vec2(0.0, texel.y)) + L(uv - vec2(0.0, texel.y))) * 2.0;
+        t += L(uv + texel) + L(uv - texel) +
+             L(uv + vec2(texel.x, -texel.y)) + L(uv + vec2(-texel.x, texel.y));
+        t *= 1.0 / 16.0;
+        gl_FragColor = bloomEncode(bloomDecode(texture2D(cur, uv)) + t * scatter);
       }
     `,
+    attributes: { position },
     uniforms: {
-      iResolution: () => [canvas.width, canvas.height],
-      iChannel0: regl.prop('iChannel0'), // sampler2D
-      blurMag: regl.prop('blurMag')
-    },
-    attributes: {
-      position: [
-        -1, -1,
-        -1, 4,
-        4, -1
-      ]
+      low: regl.prop('low'),
+      cur: regl.prop('cur'),
+      texel: regl.prop('texel'),
+      scatter: regl.prop('scatter')
     },
     count: 3,
-    primitive: 'triangles'
+    depth: { enable: false },
+    blend: { enable: false },
+    framebuffer: regl.prop('fbo')
   })
 
-  const renderBloomCombine = regl({
-    vert: `
-      precision highp float;
-
-      attribute vec2 position;
-
-      varying vec2 uv;
-
-      void main() {
-        uv = position / 2.0 + 0.5;
-        gl_Position = vec4(position, 0, 1);
-      }
-    `,
-    frag: `
-      precision highp float;
-
-      varying vec2 uv;
-
-      uniform sampler2D iChannel0;
-      uniform sampler2D blurredFrame;
-      uniform float blurWeight;
-      uniform float originalWeight;
-
-      void main () {
-        vec4 blurred = texture2D(blurredFrame, uv);
-        vec4 original = texture2D(iChannel0, uv);
-        if (blurred.r < 0.2 && original.r < 0.2) {
-          gl_FragColor = original;
-        } else {
-          blurred.r = pow(blurred.r, 1.9);
-          blurred.g = pow(blurred.g, 2.0);
-          blurred.b = pow(blurred.b, 1.5);
-          vec4 weightedOriginal = originalWeight * original;
-          vec4 weightedBlur = blurWeight * blurred;
-          // gl_FragColor = vec4(
-          //   max(weightedOriginal.r, weightedBlur.r),
-          //   max(weightedOriginal.g, weightedBlur.g),
-          //   max(weightedOriginal.b, weightedBlur.b),
-          //   original.a
-          // );
-          vec4 result = weightedOriginal + weightedBlur;
-          gl_FragColor = vec4(result.rgb / 1.5, result.a);
-        }
-      }
-    `,
-    uniforms: {
-      iChannel0: regl.prop('iChannel0'), // sampler2D
-      blurredFrame: () => tempFbo, // sampler2D
-      blurWeight: regl.prop('blurWeight'),
-      originalWeight: regl.prop('originalWeight')
-    },
-    attributes: {
-      position: [
-        -1, -1,
-        -1, 4,
-        4, -1
-      ]
-    },
-    count: 3,
-    primitive: 'triangles'
-  })
-
-  const renderToTempFbo = regl({ framebuffer: tempFbo })
-
-  return function render ({ iChannel0, blurMag, blurWeight, originalWeight }) {
-    // keep the bloom buffer in sync with the canvas after a window resize
-    const w = Math.max(1, canvas.width)
-    const h = Math.max(1, canvas.height)
-    if (tempFbo.width !== w || tempFbo.height !== h) {
-      tempFbo.resize(w, h)
+  let curW = 0
+  let curH = 0
+  function resize (w, h) {
+    if (w === curW && h === curH) return
+    curW = w
+    curH = h
+    for (let i = 0; i < levels; i++) {
+      const mw = Math.max(1, w >> (i + 1))
+      const mh = Math.max(1, h >> (i + 1))
+      down[i].resize(mw, mh)
+      if (up[i]) up[i].resize(mw, mh)
     }
-    renderToTempFbo(() => {
-      renderBloomBlur({ iChannel0, blurMag })
-    })
-    renderBloomCombine({
-      iChannel0,
-      blurWeight,
-      originalWeight,
-      blurredFrame: tempFbo
-    })
   }
+
+  // returns { texture, norm }: norm is the sum of the level weights, divide
+  // the bloom intensity by it to keep the brightness independent of scatter
+  function render ({ source, width, height, threshold, knee, scatter }) {
+    resize(Math.max(1, width | 0), Math.max(1, height | 0))
+    const kneeAbs = Math.max(threshold * knee, 1e-4)
+
+    prefilterPass({
+      fbo: down[0],
+      src: source,
+      texel: [1 / curW, 1 / curH],
+      threshold,
+      knee: kneeAbs
+    })
+    for (let i = 1; i < levels; i++) {
+      downPass({
+        fbo: down[i],
+        src: down[i - 1],
+        texel: [1 / down[i - 1].width, 1 / down[i - 1].height],
+        threshold,
+        knee: kneeAbs
+      })
+    }
+    let low = down[levels - 1]
+    for (let i = levels - 2; i >= 0; i--) {
+      upPass({
+        fbo: up[i],
+        low,
+        cur: down[i],
+        texel: [1 / low.width, 1 / low.height],
+        scatter
+      })
+      low = up[i]
+    }
+
+    let norm = 0
+    for (let i = 0; i < levels; i++) norm += Math.pow(scatter, i)
+    return { texture: low, norm: Math.max(norm, 1e-4) }
+  }
+
+  function destroy () {
+    for (const f of down.concat(up)) {
+      const tex = f.color[0]
+      f.destroy()
+      tex.destroy()
+    }
+    position.destroy()
+  }
+
+  return { render, resize, destroy, levels }
 }
