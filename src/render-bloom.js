@@ -1,6 +1,33 @@
-const glsl = require('glslify')
+// Hash blur, inlined from glsl-hash-blur + glsl-random (MIT),
+// specialised with sample = tex and iterations = 20.
+const hashBlur = `
+      highp float random(vec2 co) {
+        highp float a = 12.9898;
+        highp float b = 78.233;
+        highp float c = 43758.5453;
+        highp float dt = dot(co.xy, vec2(a, b));
+        highp float sn = mod(dt, 3.14);
+        return fract(sin(sn) * c);
+      }
 
-module.exports = function createRenderBloom (regl, canvas) {
+      vec2 mult(inout vec2 r) {
+        r = fract(r * vec2(12.9898, 78.233));
+        return sqrt(r.x + .001) * vec2(sin(r.y * 6.28318530718), cos(r.y * 6.28318530718));
+      }
+
+      vec3 blur(vec2 uv, float radius, float aspect) {
+        vec2 circle = vec2(radius);
+        circle.x *= aspect;
+        vec2 rnd = vec2(random(uv));
+        vec3 acc = vec3(0.0);
+        for (int i = 0; i < 20; i++) {
+          acc += tex(uv + circle * mult(rnd)).xyz;
+        }
+        return acc / 20.0;
+      }
+`
+
+export default function createRenderBloom (regl, canvas) {
   const blueTextureBuffer = new Uint8Array(canvas.width * canvas.height * 4)
   for (let i = 0; i < blueTextureBuffer.length; i += 4) {
     const x = i / 4 % canvas.width
@@ -23,7 +50,7 @@ module.exports = function createRenderBloom (regl, canvas) {
   })
 
   const renderBloomBlur = regl({
-    vert: glsl`
+    vert: `
       precision highp float;
 
       attribute vec2 position;
@@ -35,7 +62,7 @@ module.exports = function createRenderBloom (regl, canvas) {
         gl_Position = vec4(position, 0, 1);
       }
     `,
-    frag: glsl`
+    frag: `
       precision highp float;
 
       varying vec2 uv;
@@ -46,7 +73,7 @@ module.exports = function createRenderBloom (regl, canvas) {
 
       vec3 tex(vec2 uv);
 
-      #pragma glslify: blur = require('glsl-hash-blur', sample=tex, iterations=20);
+      ${hashBlur}
 
       vec3 tex(vec2 uv) {
         vec3 rgb = texture2D(iChannel0, uv).rgb;
@@ -76,7 +103,7 @@ module.exports = function createRenderBloom (regl, canvas) {
   })
 
   const renderBloomCombine = regl({
-    vert: glsl`
+    vert: `
       precision highp float;
 
       attribute vec2 position;
@@ -88,7 +115,7 @@ module.exports = function createRenderBloom (regl, canvas) {
         gl_Position = vec4(position, 0, 1);
       }
     `,
-    frag: glsl`
+    frag: `
       precision highp float;
 
       varying vec2 uv;
@@ -137,8 +164,14 @@ module.exports = function createRenderBloom (regl, canvas) {
     primitive: 'triangles'
   })
 
+  const renderToTempFbo = regl({ framebuffer: tempFbo })
+
   return function render ({ iChannel0, blurMag, blurWeight, originalWeight }) {
-    regl({ framebuffer: tempFbo })(() => {
+    // keep the bloom buffer in sync with the canvas after a window resize
+    if (tempFbo.width !== canvas.width || tempFbo.height !== canvas.height) {
+      tempFbo.resize(canvas.width, canvas.height)
+    }
+    renderToTempFbo(() => {
       renderBloomBlur({ iChannel0, blurMag })
     })
     renderBloomCombine({

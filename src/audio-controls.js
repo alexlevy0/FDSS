@@ -1,7 +1,8 @@
-const css = require('dom-css')
+import css from 'dom-css'
 
-module.exports = function createAudioControls (audio, tracks) {
-  tracks = tracks.map(t => Object.assign({}, t))
+export default function createAudioControls (audio, tracks) {
+  const element = audio.element
+  tracks = tracks.map((t) => Object.assign({}, t))
   const controlsContainer = document.querySelector('.controls-container')
   const trackSelector = document.querySelector('.track-selector')
   const titleEl = document.querySelector('.title')
@@ -9,71 +10,85 @@ module.exports = function createAudioControls (audio, tracks) {
   const timeEl = document.querySelector('.elapsed-time')
   const seekerEl = document.querySelector('.seeker')
   const progressEl = document.querySelector('.progress')
-  // const width = 290 // must match .controls-container width
-  const width = window.innerWidth // must match .controls-container width
-  // console.log('window.innerWidth : ', window.innerWidth)
-  tracks.map((track, i) => {
+  const playPauseEl = document.querySelector('.play-pause')
+
+  let current = 0
+
+  tracks.forEach((track, i) => {
     const trackEl = trackSelector.appendChild(document.createElement('li'))
     trackEl.classList.add('track')
     trackEl.addEventListener('click', () => {
-      setTrack(tracks[i])
+      setTrack(i)
       audio.play()
     })
-    trackEl.innerHTML = '<span>0' + (1 + i) + '.</span> ' + track.title
+    const num = trackEl.appendChild(document.createElement('span'))
+    num.textContent = `0${i + 1}.`
+    trackEl.appendChild(document.createTextNode(' ' + track.title))
     track.el = trackEl
   })
 
-  function setTrack (track) {
-    audio.src = track.path
-    tracks.forEach(t => t.el.classList.remove('selected'))
+  function setTrack (i) {
+    current = i
+    const track = tracks[i]
+    if (!element.src.endsWith(track.path)) element.src = track.path
+    tracks.forEach((t) => t.el.classList.remove('selected'))
     track.el.classList.add('selected')
-    titleEl.innerText = track.title
-    artistEl.innerText = track.artist
+    titleEl.textContent = track.title
+    artistEl.textContent = track.artist
   }
 
-  setTrack(tracks[0])
+  setTrack(0)
+
+  // chain the mixes: when one ends, play the next one
+  element.addEventListener('ended', () => {
+    setTrack((current + 1) % tracks.length)
+    audio.play()
+  })
 
   let lastTime
   function tick () {
-    if (audio.currentTime !== lastTime) {
-      const t = audio.currentTime / audio.duration
+    if (element.currentTime !== lastTime && element.duration) {
+      const t = element.currentTime / element.duration
       css(progressEl, 'width', `${t * 100}%`)
-      timeEl.innerText = formatSeconds(audio.currentTime)
+      timeEl.textContent = formatSeconds(element.currentTime)
     }
-    lastTime = audio.currentTime
+    lastTime = element.currentTime
   }
 
-  seekerEl.addEventListener('click', e => {
-    const { left } = seekerEl.getBoundingClientRect()
+  seekerEl.addEventListener('click', (e) => {
+    // measure on click so the seek stays correct after a resize
+    const { left, width } = seekerEl.getBoundingClientRect()
     const t = (e.clientX - left) / width
-    audio.currentTime = t * audio.duration
+    if (element.duration) element.currentTime = t * element.duration
   })
-
-  window.addEventListener('keypress', (e) => {
-    if (e.key === ' ') {
-      togglePlay()
-    }
-  })
-
-  return {
-    el: controlsContainer,
-    tick: tick
-  }
 
   function togglePlay () {
-    if (audio.paused) {
+    if (element.paused) {
       audio.play()
     } else {
       audio.pause()
     }
   }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && e.target === document.body) {
+      e.preventDefault()
+      togglePlay()
+    }
+  })
+  playPauseEl.addEventListener('click', togglePlay)
+
+  return {
+    el: controlsContainer,
+    tick
+  }
 }
 
 function formatSeconds (seconds) {
-  const minutes = seconds / 60 | 0
-  seconds = '' + (seconds % 60 | 0)
-  if (seconds.length === 1) {
-    seconds = `0${seconds}`
-  }
-  return `${minutes}:${seconds}`
+  const hours = (seconds / 3600) | 0
+  const minutes = ((seconds % 3600) / 60) | 0
+  const secs = String(seconds % 60 | 0).padStart(2, '0')
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${secs}`
+    : `${minutes}:${secs}`
 }

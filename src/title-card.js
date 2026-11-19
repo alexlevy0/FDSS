@@ -1,7 +1,7 @@
-const fit = require('canvas-fit')
-const css = require('dom-css')
-const Alea = require('alea')
-const { createSpring } = require('spring-animator')
+import fit from 'canvas-fit'
+import css from 'dom-css'
+import Alea from 'alea'
+import { createSpring } from 'spring-animator'
 
 const settings = {
   // text: 'Fievres \ndu \nSamedi Soir',
@@ -33,10 +33,9 @@ window.addEventListener('resize', resize)
 
 const instructions = container.querySelector('.instructions')
 const button = container.querySelector('button')
-console.log({button})
 let rand, points, pixelPicker, rAFToken, start, isFading
 
-module.exports = function createTitleCard () {
+export default function createTitleCard () {
   return {
     resize: function () {
       if (isFading) return
@@ -54,17 +53,11 @@ module.exports = function createTitleCard () {
       loop()
       return new Promise((resolve) => {
         button.addEventListener('click', (e) => {
-          console.log('1')
           e.preventDefault()
-          console.log('2')
           remove()
-          console.log('3')
           activateDrawers()
-          console.log('4')
           resolve()
-          console.log('5')
-          return false
-        })
+        }, { once: true })
       })
     }
   }
@@ -95,7 +88,6 @@ module.exports = function createTitleCard () {
     console.log(`alexlevy0 🕴`)
     const seed = Math.random() * 1000 | 0 // 74 & 336 looks good
     rand = new Alea(seed)
-    console.log(`seed: ${seed}`)
     pixelPicker = getSource()
     points = (new Array(settings.particles)).fill().map(() => {
       const rads = rand() * Math.PI * 2
