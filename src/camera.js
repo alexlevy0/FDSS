@@ -1,6 +1,6 @@
-const createCamera = require('3d-view-controls')
+import createCamera from '3d-view-controls'
 
-module.exports = function createRoamingCamera(canvas, center, eye) {
+export default function createRoamingCamera (canvas, center, eye) {
   let isRoaming = false
   let timeout
 
@@ -73,7 +73,6 @@ module.exports = function createRoamingCamera(canvas, center, eye) {
     isRoaming = false
   }
 
-  window.camera = camera
   return {
     tick,
     start,

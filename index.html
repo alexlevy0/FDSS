@@ -2,7 +2,7 @@
 <html lang="en" dir="ltr">
 
 <head>
-  <title>Fievres du Samedi Soir</title>
+  <title>Fièvres du Samedi Soir</title>
   <meta charset="utf-8">
   <meta name="description" content="Fievres du Samedi Soir">
   <!-- Chrome, Firefox OS and Opera -->
@@ -14,7 +14,7 @@
   <meta name="news_keywords"
     content="fievresdusamedisoir, instagram, music, music visualization, webgl, 3d, data viz, data, data vis">
 
-  <meta property="og:title" content="FievresDuDamediSoir">
+  <meta property="og:title" content="Fièvres du Samedi Soir">
   <meta property="og:description" content="Fievres du Samedi Soir ">
   <meta property="og:type" content="article">
 
@@ -22,9 +22,10 @@
   <style>
     @font-face {
       font-family: 'Open Sans';
-      src: url('src/fonts/OpenSans-Regular.ttf') format('ttf'),
-        url('src/fonts/OpenSans-Regular.woff') format('woff'),
-        url('src/fonts/OpenSans-Regular.woff2') format('woff2');
+      src: url('/fonts/OpenSans-Regular.woff2') format('woff2'),
+        url('/fonts/OpenSans-Regular.woff') format('woff'),
+        url('/fonts/OpenSans-Regular.ttf') format('truetype');
+      font-display: swap;
     }
 
     html,
@@ -212,10 +213,24 @@
       color: #aaa;
     }
 
-    .dg {
-      width: 100% !important;
-      font-size: 15px !important;
-      padding: 20px;
+    .lil-gui.root {
+      --width: 100%;
+      --font-size: 15px;
+      --widget-height: 28px;
+      top: 0;
+      right: 0;
+    }
+
+    .play-pause {
+      background: none;
+      border: 0;
+      padding: 0;
+      font: inherit;
+      color: inherit;
+    }
+
+    .insta {
+      text-decoration: none;
     }
   </style>
   <!-- Global site tag (gtag.js) - Google Analytics -->
@@ -227,11 +242,6 @@
 
     gtag('config', 'G-67M4RNKP2Q');
   </script>
-  <script>
-    function playPause() {
-      window.dispatchEvent(new KeyboardEvent('keypress', { 'key': ' ' }));
-    }
-  </script>
 </head>
 
 <body>
@@ -240,17 +250,13 @@
     <canvas></canvas>
     <div class="instructions">
       <!-- <div class="turnup">🔈🔉🔊</div> -->
-      <button>🔊</button>
+      <button type="button" aria-label="Lancer la musique">🔊</button>
     </div>
   </div>
   <div class="controls-container">
     <div class="controls-header">
-      <a onclick="playPause()" class="github-link">
-        ⏯️
-      </a>
-      <span onclick="window.open('https://www.instagram.com/alexlevy0/')" class="insta">
-        🕴
-      </span>
+      <button type="button" class="github-link play-pause" aria-label="Lecture / pause">⏯️</button>
+      <a href="https://www.instagram.com/alexlevy0/" target="_blank" rel="noopener" class="insta" aria-label="Instagram">🕴</a>
       <div class="title"></div>
       <div class="artist"></div>
       <div class="elapsed-time"></div>
@@ -260,7 +266,7 @@
     </div>
     <ul class="track-selector"></ul>
   </div>
-  <script src="bundle.js"></script>
+  <script type="module" src="/src/index.js"></script>
 </body>
 
 </html>

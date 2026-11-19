@@ -1,10 +1,9 @@
-const glsl = require('glslify')
-const { createSpring } = require('spring-animator')
+import { createSpring } from 'spring-animator'
 
 let linesOffsetsLoopToken
 let lines = []
 
-module.exports = function createRenderGrid (regl, settings) {
+export default function createRenderGrid (regl, settings) {
   lines = []
 
   for (let j = 1; j < settings.gridLines; j++) {
@@ -37,10 +36,10 @@ module.exports = function createRenderGrid (regl, settings) {
     return linesPositions
   }
 
-  const linesPositions = getLinesPositions([], lines)
+  const linesPositions = getLinesPositions(null, lines)
   const linesBuffer = regl.buffer(linesPositions)
   const render = regl({
-    vert: glsl`
+    vert: `
       attribute vec2 position;
 
       varying vec4 fragColor;
@@ -61,7 +60,7 @@ module.exports = function createRenderGrid (regl, settings) {
         gl_Position = projection * view * vec4(position.xy, frequencyVal * gridMaxHeight * multiplier, 1);
       }
     `,
-    frag: glsl`
+    frag: `
       precision highp float;
       varying vec4 fragColor;
       void main() {
@@ -94,7 +93,7 @@ module.exports = function createRenderGrid (regl, settings) {
   })
 
   clearTimeout(linesOffsetsLoopToken)
-  linesOffsetsLoopToken = setTimeout(setLinesOffsetsLoop, 15000)
+  linesOffsetsLoopToken = setTimeout(setLinesOffsetsLoop, 15000 + 9500)
 
   let calls = 0
   function setLinesOffsets () {
@@ -122,12 +121,11 @@ module.exports = function createRenderGrid (regl, settings) {
     })
   }
 
+  // Every 9.5s, reshuffle the grid lines. The token is always the pending
+  // timeout so a new setup() (e.g. on resize) cancels the previous loop.
   function setLinesOffsetsLoop () {
-    setTimeout(() => {
-      clearTimeout(linesOffsetsLoopToken)
-      setLinesOffsets()
-      linesOffsetsLoopToken = setLinesOffsetsLoop()
-    }, 9500)
+    setLinesOffsets()
+    linesOffsetsLoopToken = setTimeout(setLinesOffsetsLoop, 9500)
   }
 
   return function ({ frequencyVals, gridMaxHeight, multiplier }) {

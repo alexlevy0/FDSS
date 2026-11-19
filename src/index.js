@@ -1,22 +1,19 @@
-const createRegl = require('regl')
-const glsl = require('glslify')
-const mat4 = require('gl-mat4')
-const css = require('dom-css')
-const fit = require('canvas-fit')
-const { GUI } = require('dat-gui')
-const array = require('new-array')
-const shuffle = require('shuffle-array')
-const Alea = require('alea')
-const { createSpring } = require('spring-animator')
-const Delaunator = require('delaunator')
-const createPlayer = require('web-audio-player')
-const createAnalyser = require('web-audio-analyser')
-const createCamera = require('./camera')
-const createTitleCard = require('./title-card')
-const createAudioControls = require('./audio-controls')
-const createRenderBloom = require('./render-bloom')
-const createRenderBlur = require('./render-blur')
-const createRenderGrid = require('./render-grid')
+import createRegl from 'regl'
+import mat4 from 'gl-mat4'
+import css from 'dom-css'
+import fit from 'canvas-fit'
+import GUI from 'lil-gui'
+import shuffle from 'shuffle-array'
+import Alea from 'alea'
+import { createSpring } from 'spring-animator'
+import Delaunator from 'delaunator'
+import createAudio from './audio'
+import createCamera from './camera'
+import createTitleCard from './title-card'
+import createAudioControls from './audio-controls'
+import createRenderBloom from './render-bloom'
+import createRenderBlur from './render-blur'
+import createRenderGrid from './render-grid'
 
 const titleCard = createTitleCard()
 const canvas = document.querySelector('canvas.viz')
@@ -33,8 +30,7 @@ window.addEventListener(
 const camera = createCamera(canvas, [2.5, 2.5, 2.5], [0, 0, 0])
 const regl = createRegl(canvas)
 
-let analyser,
-  delaunay,
+let delaunay,
   points,
   positions,
   positionsBuffer,
@@ -62,47 +58,21 @@ const renderBloom = createRenderBloom(regl, canvas)
 const renderBlur = createRenderBlur(regl)
 
 const tracks = [
-  {
-    title: '#3',
-    artist: 'fievresdusamedisoir',
-    path: 'src/audio/fievresdusamedisoir3.mp3'
-  },
-  {
-    title: '#2',
-    artist: 'fievresdusamedisoir',
-    path: 'src/audio/fievresdusamedisoir2.mp3'
-  },
-  {
-    title: '#1',
-    artist: 'fievresdusamedisoir',
-    path: 'src/audio/fievresdusamedisoir.mp3'
-  }
-  // {title: '715 - CRΣΣKS', artist: 'Bon Iver', path: 'src/audio/715-creeks.mp3'},
-  // {title: 'Another New World', artist: 'Punch Brothers', path: 'src/audio/another-new-world.mp3'},
-  // {title: 'The Wilder Sun', artist: 'Jon Hopkins', path: 'src/audio/the-wilder-sun.mp3'},
-  // {title: 'Lost It To Trying', artist: 'Son Lux', path: 'src/audio/lost-it-to-trying.mp3'},
-  // {title: 'Adagio for Strings', artist: 'Samuel Barber', path: 'src/audio/adagio-for-strings.mp3'}
+  { title: '#3', artist: 'fievresdusamedisoir', path: 'audio/fievresdusamedisoir3.mp3' },
+  { title: '#2', artist: 'fievresdusamedisoir', path: 'audio/fievresdusamedisoir2.mp3' },
+  { title: '#1', artist: 'fievresdusamedisoir', path: 'audio/fievresdusamedisoir.mp3' }
 ]
 
-const audio = createPlayer(tracks[0].path)
+const audio = createAudio(tracks[0].path)
+const analyser = audio
 
-audio.on('load', function () {
-  window.audio = audio
-  analyser = createAnalyser(audio.node, audio.context, {
-    audible: true,
-    stereo: true
-  })
-  const audioControls = createAudioControls(audio.element, tracks)
+audio.ready.then(() => {
+  const audioControls = createAudioControls(audio, tracks)
 
   function loop () {
     window.requestAnimationFrame(loop)
     audioControls.tick()
   }
-
-  analyser.analyser.fftSize = 1024 * 2
-  analyser.analyser.minDecibels = -75
-  analyser.analyser.maxDecibels = -30
-  analyser.analyser.smoothingTimeConstant = 0.5
 
   setup()
 
@@ -120,7 +90,7 @@ audio.on('load', function () {
         transition: 'opacity 1s linear',
         opacity: 1
       })
-      css(gui.domElement.parentElement, {
+      css(gui.domElement, {
         transition: 'opacity 1s linear',
         opacity: 1
       })
@@ -159,8 +129,8 @@ const settings = {
 }
 
 const gui = new GUI()
-gui.closed = true
-css(gui.domElement.parentElement, {
+gui.close()
+css(gui.domElement, {
   zIndex: 11,
   opacity: 0
 })
@@ -186,6 +156,7 @@ function setup () {
   const rand = new Alea(settings.seed)
   points = []
 
+  if (blurredFbo) blurredFbo.destroy()
   blurredFbo = getFrameBuffer(canvas.width, canvas.height)
   renderToBlurredFBO = regl({ framebuffer: blurredFbo })
 
@@ -203,10 +174,9 @@ function setup () {
     points.push(point)
   }
 
-  array(Math.max(0, settings.points - points.length)).forEach((_, i) => {
-    const id = points.length
-    points.push(createPoint(id, [rand() * 2 - 1, rand() * 2 - 1]))
-  })
+  while (points.length < settings.points) {
+    points.push(createPoint(points.length, [rand() * 2 - 1, rand() * 2 - 1]))
+  }
 
   function createPoint (id, position) {
     return {
@@ -243,10 +213,11 @@ function setup () {
   })
 
   positions = new Float32Array(delaunay.triangles.length * 3)
+  if (positionsBuffer) positionsBuffer.destroy()
   positionsBuffer = regl.buffer(positions)
 
   renderFrequencies = regl({
-    vert: glsl`
+    vert: `
       attribute vec3 position;
 
       varying vec4 fragColor;
@@ -257,7 +228,7 @@ function setup () {
         gl_Position = vec4(position.xy, 0, 1);
       }
     `,
-    frag: glsl`
+    frag: `
       precision highp float;
       varying vec4 fragColor;
       void main() {
@@ -319,14 +290,14 @@ const renderGlobals = regl({
 })
 
 const renderColoredQuad = regl({
-  vert: glsl`
+  vert: `
     precision highp float;
     attribute vec2 position;
     void main() {
       gl_Position = vec4(position, 0, 1);
     }
   `,
-  frag: glsl`
+  frag: `
     precision highp float;
     uniform vec4 color;
     void main () {
