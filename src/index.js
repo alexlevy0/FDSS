@@ -15,6 +15,7 @@ import createRenderBloom from './render-bloom'
 import createRenderBlur from './render-blur'
 import createRenderGrid from './render-grid'
 
+let hasSetUp = false
 const titleCard = createTitleCard()
 const canvas = document.querySelector('canvas.viz')
 const resize = fit(canvas)
@@ -42,7 +43,7 @@ let delaunay,
 const getFrameBuffer = (width, height) =>
   regl.framebuffer({
     color: regl.texture({
-      shape: [width, height, 4]
+      shape: [Math.max(1, width), Math.max(1, height), 4]
     }),
     depth: false,
     stencil: false
@@ -95,11 +96,25 @@ audio.ready.then(() => {
         opacity: 1
       })
       window.requestAnimationFrame(loop)
-      audio.play()
+      playWhenAllowed()
       camera.start()
       startLoop()
     })
 })
+
+// When the title card enters on its own there was no click, so browsers
+// may block the sound: start it on the first interaction instead.
+function playWhenAllowed () {
+  audio.play().then((started) => {
+    if (started) return
+    const events = ['pointerdown', 'keydown', 'touchend']
+    const unlock = () => {
+      events.forEach((e) => window.removeEventListener(e, unlock, true))
+      audio.play()
+    }
+    events.forEach((e) => window.addEventListener(e, unlock, true))
+  })
+}
 
 const settings = {
   seed: 0,
@@ -150,7 +165,6 @@ gridGUI.add(settings, 'gridMaxHeight', 0.01, 0.8).step(0.01)
 gui.add(settings, 'motionBlur')
 gui.add(settings, 'motionBlurAmount', 0.01, 1).step(0.01)
 
-let hasSetUp = false
 function setup () {
   hasSetUp = true
   const rand = new Alea(settings.seed)

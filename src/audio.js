@@ -39,10 +39,13 @@ export default function createAudio (src) {
       analyser.getByteFrequencyData(freqData)
       return freqData
     },
+    // Resolves true if playback started, false if the browser blocked it
+    // (autoplay policy: no user gesture yet).
     play () {
-      // AudioContext starts suspended until a user gesture.
       if (context.state === 'suspended') context.resume()
-      return element.play().catch((err) => console.warn('playback blocked:', err))
+      // the element can "play" while the context is still suspended (silent),
+      // so only count it as started once the context is running too
+      return element.play().then(() => context.state === 'running', () => false)
     },
     pause () {
       element.pause()

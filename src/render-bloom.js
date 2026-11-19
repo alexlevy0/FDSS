@@ -28,10 +28,13 @@ const hashBlur = `
 `
 
 export default function createRenderBloom (regl, canvas) {
-  const blueTextureBuffer = new Uint8Array(canvas.width * canvas.height * 4)
+  // the canvas can still be 0x0 if the page loads before layout (hidden tab)
+  const width = Math.max(1, canvas.width)
+  const height = Math.max(1, canvas.height)
+  const blueTextureBuffer = new Uint8Array(width * height * 4)
   for (let i = 0; i < blueTextureBuffer.length; i += 4) {
-    const x = i / 4 % canvas.width
-    const y = i / 4 / canvas.width | 0
+    const x = i / 4 % width
+    const y = i / 4 / width | 0
     if (x > 100 && y > 100) {
       blueTextureBuffer[i] = blueTextureBuffer[i + 1] = 0
       blueTextureBuffer[i + 2] = blueTextureBuffer[i + 3] = 255
@@ -42,7 +45,7 @@ export default function createRenderBloom (regl, canvas) {
   }
   const tempFbo = regl.framebuffer({
     color: regl.texture({
-      shape: [canvas.width, canvas.height, 4],
+      shape: [width, height, 4],
       data: blueTextureBuffer
     }),
     depth: true,
@@ -168,8 +171,10 @@ export default function createRenderBloom (regl, canvas) {
 
   return function render ({ iChannel0, blurMag, blurWeight, originalWeight }) {
     // keep the bloom buffer in sync with the canvas after a window resize
-    if (tempFbo.width !== canvas.width || tempFbo.height !== canvas.height) {
-      tempFbo.resize(canvas.width, canvas.height)
+    const w = Math.max(1, canvas.width)
+    const h = Math.max(1, canvas.height)
+    if (tempFbo.width !== w || tempFbo.height !== h) {
+      tempFbo.resize(w, h)
     }
     renderToTempFbo(() => {
       renderBloomBlur({ iChannel0, blurMag })

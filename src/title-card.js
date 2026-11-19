@@ -16,7 +16,8 @@ const settings = {
   // speed: 50,
   precision: 0.98,
   // precision: 0.8,
-  lineOpacity: 0.17,
+  lineOpacity: 0.5,
+  autoEnterDelay: 3000, // ms before entering without a click
   turnGranularity: 12,
   startSpreadMultiplier: 0.35,
   particleDieRate: 0,
@@ -52,11 +53,20 @@ export default function createTitleCard () {
       setup()
       loop()
       return new Promise((resolve) => {
-        button.addEventListener('click', (e) => {
-          e.preventDefault()
+        let entered = false
+        function enter () {
+          if (entered) return
+          entered = true
+          clearTimeout(autoEnterToken)
           remove()
           activateDrawers()
           resolve()
+        }
+        // enter on click, or on its own after a few seconds
+        const autoEnterToken = setTimeout(enter, settings.autoEnterDelay)
+        button.addEventListener('click', (e) => {
+          e.preventDefault()
+          enter()
         }, { once: true })
       })
     }
@@ -180,7 +190,7 @@ export default function createTitleCard () {
         if (!p.isActive) return
         const radius = p.line.length ? settings.particleSize : 0
         const opacity = 0.2 * (radius < 10 ? radius / 10 : 1)
-        ctx.strokeStyle = `rgba(200, 200, 255, ${opacity})`
+        ctx.strokeStyle = `rgba(255, 255, 255, ${opacity})`
         ctx.beginPath()
         ctx.arc(p.x, p.y, radius, 0, Math.PI * 2)
         ctx.stroke()
@@ -188,7 +198,7 @@ export default function createTitleCard () {
     }
 
     ctx.beginPath()
-    ctx.strokeStyle = `rgba(200, 200, 255, ${settings.lineOpacity})`
+    ctx.strokeStyle = `rgba(255, 255, 255, ${settings.lineOpacity})`
     points.forEach((p) => {
       if (p.line.length > 1) {
         ctx.moveTo(p.line[0][0], p.line[0][1])
