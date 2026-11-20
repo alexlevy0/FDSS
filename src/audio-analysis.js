@@ -6,8 +6,15 @@
 //   bass / mid / treble / energy   smoothed aggregates, 0..1
 //   kick      0..1 envelope: jumps to 1 on a low-end onset, then decays
 //   onKick    true only on the frame an onset is detected
+//   bandsL / bandsR   the same bands for each channel (own AGC); `bands`
+//             is the mono mix (average of both channels). With a mono
+//             source all three are identical.
+//   section, sectionName, onSectionChange, tension, bpm, bpmConfidence,
+//   beatPhase, beat, onBeat, onBar, onPhrase   see music-structure.js
 //
 // index.js calls update(dt) once per frame and hands `features` around.
+
+import createMusicStructure from './music-structure'
 
 const DEFAULTS = {
   bandCount: 200, // fixed at creation
@@ -77,11 +84,20 @@ export default function createAnalysis (audio, opts = {}) {
   const kickRange = bandRange(opts.kickLowFreq, opts.kickHighFreq)
 
   // --- state --------------------------------------------------------------
-  const raw = new Float32Array(bandCount) // 0..~1.3, from dB
+  const raw = new Float32Array(bandCount) // 0..~1.3, from dB (mono)
   const prevRaw = new Float32Array(bandCount)
-  const runMax = new Float32Array(bandCount).fill(0.5)
-  const runMin = new Float32Array(bandCount)
-  const bands = new Float32Array(bandCount)
+  const rawL = new Float32Array(bandCount)
+  const rawR = new Float32Array(bandCount)
+  // per-band AGC state and output, for mono / left / right
+  const createAgc = () => ({
+    runMax: new Float32Array(bandCount).fill(0.5),
+    runMin: new Float32Array(bandCount),
+    out: new Float32Array(bandCount)
+  })
+  const agcMono = createAgc()
+  const agcL = createAgc()
+  const agcR = createAgc()
+  const bands = agcMono.out
 
   let gate = 0
   let fluxMean = 0
@@ -90,6 +106,9 @@ export default function createAnalysis (audio, opts = {}) {
 
   const features = {
     bands,
+    bandsL: agcL.out,
+    bandsR: agcR.out,
+    stereo: !!(audio.floatFrequenciesR && audio.analyserR),
     bandCount,
     bass: 0,
     mid: 0,
@@ -110,8 +129,8 @@ export default function createAnalysis (audio, opts = {}) {
     return s / (b - a)
   }
 
-  function readRaw () {
-    const db = audio.floatFrequencies()
+  // spectrum (dB) -> raw band levels in `out`; returns their mean
+  function readRaw (db, out) {
     const minDb = analyser.minDecibels
     const span = analyser.maxDecibels - minDb
     const level = (k) => {
@@ -120,6 +139,7 @@ export default function createAnalysis (audio, opts = {}) {
       if (!(v > minDb)) return 0
       return Math.min((v - minDb) / span, 1.3)
     }
+    let total = 0
     for (let i = 0; i < bandCount; i++) {
       const lo = bandLo[i]
       const hi = bandHi[i]
@@ -136,28 +156,36 @@ export default function createAnalysis (audio, opts = {}) {
         for (let k = k0; k < k1; k++) s += level(k)
         v = s / Math.max(1, k1 - k0)
       }
+      out[i] = v
+      total += v
+    }
+    return total / bandCount
+  }
+
+  function readChannels () {
+    const levelL = readRaw(audio.floatFrequencies(), rawL)
+    const dbR = features.stereo ? audio.floatFrequenciesR() : null
+    const levelR = dbR ? readRaw(dbR, rawR) : 0
+    // a mono file leaves the splitter's second output silent (and a lone
+    // silent channel is not worth showing): use the other channel for it
+    if (!dbR || levelR < levelL * 0.15) rawR.set(rawL)
+    else if (levelL < levelR * 0.15) rawL.set(rawR)
+    for (let i = 0; i < bandCount; i++) {
       prevRaw[i] = raw[i]
-      raw[i] = v
+      raw[i] = (rawL[i] + rawR[i]) * 0.5
     }
   }
 
-  function update (dt) {
-    dt = Math.min(Math.max(dt || 0, 0), 0.1)
-    readRaw()
-
-    // noise gate on the overall level, smoothed so it never pops
-    let total = 0
-    for (let i = 0; i < bandCount; i++) total += raw[i]
-    const level = total / bandCount
-    const gateTarget = clamp01((level - opts.noiseGate * 0.5) / (opts.noiseGate * 0.5 || 1e-3))
-    gate += (gateTarget - gate) * (1 - Math.exp(-dt / 0.15))
-
-    // per-band AGC
+  // per-band AGC of `src` into agc.out
+  function applyAgc (src, agc, dt) {
     const maxDecay = Math.pow(0.5, dt / Math.max(opts.agcRelease, 0.1))
     const minRange = 1 / Math.max(opts.maxGain, 1)
-    const agc = opts.agcAmount
+    const amount = opts.agcAmount
+    const runMax = agc.runMax
+    const runMin = agc.runMin
+    const out = agc.out
     for (let i = 0; i < bandCount; i++) {
-      const v = raw[i]
+      const v = src[i]
       // the running max decays toward the floor, and jumps up on peaks
       const floor = runMin[i]
       runMax[i] = Math.max(v, floor + (runMax[i] - floor) * maxDecay)
@@ -166,8 +194,25 @@ export default function createAnalysis (audio, opts = {}) {
       runMin[i] = Math.min(v, runMin[i] + opts.agcFloorRise * dt, runMax[i] * 0.5)
       const range = Math.max(runMax[i] - runMin[i], minRange)
       const normalised = clamp01((v - runMin[i]) / range)
-      bands[i] = (clamp01(v) * (1 - agc) + normalised * agc) * gate
+      out[i] = (clamp01(v) * (1 - amount) + normalised * amount) * gate
     }
+  }
+
+  function update (dt) {
+    dt = Math.min(Math.max(dt || 0, 0), 0.1)
+    readChannels()
+
+    // noise gate on the overall level, smoothed so it never pops
+    let total = 0
+    for (let i = 0; i < bandCount; i++) total += raw[i]
+    const level = total / bandCount
+    const gateTarget = clamp01((level - opts.noiseGate * 0.5) / (opts.noiseGate * 0.5 || 1e-3))
+    gate += (gateTarget - gate) * (1 - Math.exp(-dt / 0.15))
+
+    // per-band AGC: mono (used by everything) and each channel
+    applyAgc(raw, agcMono, dt)
+    applyAgc(rawL, agcL, dt)
+    applyAgc(rawR, agcR, dt)
 
     // aggregates
     features.bass = smooth(features.bass, mean(bands, bassRange), dt)
@@ -207,7 +252,22 @@ export default function createAnalysis (audio, opts = {}) {
       // exp decay reaching ~5% after kickDecay seconds
       features.kick *= Math.exp((-3 * dt) / Math.max(opts.kickDecay, 0.01))
     }
+
+    // sections and tempo, from the raw (pre-AGC) levels: the AGC would
+    // flatten exactly the long-term changes they look for
+    structure.update(dt, level, mean(raw, bassRange), gate, isOnset)
   }
 
-  return { update, features, opts, bandFreq }
+  const structure = createMusicStructure(features)
+
+  return {
+    update,
+    features,
+    opts,
+    bandFreq,
+    // music-structure settings (sections, tempo)
+    structureOpts: structure.opts,
+    // forget the sections / tempo history (e.g. on track change)
+    resetStructure: structure.reset
+  }
 }

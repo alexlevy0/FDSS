@@ -2,6 +2,7 @@
 //  A) scene + bloom (linear) -> radial chromatic aberration -> exposure ->
 //     ACES filmic tone mapping -> gamma, into an 8-bit buffer that keeps the
 //     luma in alpha for FXAA
+//     (plus the god rays, render-godrays, added like the bloom)
 //  B) FXAA -> vignette -> film grain + triangular dither, to the canvas
 // Chromatic aberration is done in A, on the HDR samples, so FXAA smooths its
 // fringes as well; it is 0 at the centre and grows toward the corners.
@@ -29,6 +30,8 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
       uniform sampler2D scene;
       uniform sampler2D bloom;
       uniform float bloomIntensity;
+      uniform sampler2D godrays; // linear, bloom codec (render-godrays)
+      uniform float godraysIntensity;
       uniform float exposure;
       uniform float ca;
       ${BLOOM_CODEC}
@@ -63,6 +66,10 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
           col.r = hdrR(uv + d);
           col.b = hdrB(uv - d);
         }
+        // uniform branch: no fetch while the rays are off
+        if (godraysIntensity > 1e-4) {
+          col += bloomDecode(texture2D(godrays, uv)) * godraysIntensity;
+        }
         col = aces(col * exposure);
         col = pow(col, vec3(1.0 / 2.2));
         gl_FragColor = vec4(col, dot(col, vec3(0.299, 0.587, 0.114)));
@@ -73,6 +80,8 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
       scene: regl.prop('scene'),
       bloom: regl.prop('bloom'),
       bloomIntensity: regl.prop('bloomIntensity'),
+      godrays: regl.prop('godrays'),
+      godraysIntensity: regl.prop('godraysIntensity'),
       exposure: regl.prop('exposure'),
       ca: regl.prop('ca')
     },
@@ -170,6 +179,8 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
     width,
     height,
     bloomIntensity,
+    godrays = null,
+    godraysIntensity = 0,
     exposure,
     ca,
     fxaa,
@@ -181,7 +192,16 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
     const h = Math.max(1, height | 0)
     if (ldrFbo.width !== w || ldrFbo.height !== h) ldrFbo.resize(w, h)
 
-    tonemapPass({ scene, bloom, bloomIntensity, exposure, ca: Math.max(0, ca) })
+    tonemapPass({
+      scene,
+      bloom,
+      bloomIntensity,
+      // any valid texture when the rays are off (never sampled then)
+      godrays: godrays || bloom,
+      godraysIntensity: godrays ? Math.max(0, godraysIntensity) : 0,
+      exposure,
+      ca: Math.max(0, ca)
+    })
     frame = (frame + 1) % 251
     finalPass({
       texel: [1 / w, 1 / h],
