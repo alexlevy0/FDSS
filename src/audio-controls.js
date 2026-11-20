@@ -10,6 +10,10 @@
 // opts.onTrackChange(index, track) is called whenever the selected track
 // changes (initial selection, click in the list, auto-advance).
 // opts.idleDelay: ms of inactivity before hiding (default 3000).
+// opts.live: optional live input (live-input.js). Adds the LIVE button and
+// its chooser (micro / tab or screen), the L shortcut, and a live state in
+// which the seek bar and time are hidden, play/pause stops the live input
+// and a track button goes back to the file player.
 
 const reducedMotionQuery = typeof window.matchMedia === 'function'
   ? window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -35,6 +39,13 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   const progressEl = container.querySelector('.progress')
   const thumbEl = container.querySelector('.seeker-thumb')
   const playPauseEl = container.querySelector('.play-pause')
+  const live = opts.live || null
+  const liveEl = container.querySelector('.live')
+  const liveToggleEl = container.querySelector('.live-toggle')
+  const liveMenuEl = container.querySelector('.live-menu')
+  const liveDeviceEl = container.querySelector('.live-device')
+  const messageEl = container.querySelector('.live-message')
+  const isLive = () => !!(live && live.isActive())
 
   let current = -1 // set by setTrack(0) below
 
@@ -48,6 +59,11 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     button.textContent = track.title
     button.setAttribute('aria-label', `Mix ${track.title}, ${track.artist}`)
     button.addEventListener('click', (e) => {
+      // a mix picked while live, or while a live start waits on its
+      // permission prompt / share picker: back to the file player. stop()
+      // also cancels a pending start (the late stream is discarded), so
+      // granting the prompt afterwards does not override this choice.
+      if (live) live.stop()
       setTrack(i)
       audio.play()
       // after a pointer click (detail > 0), do not leave focus on the pill:
@@ -69,10 +85,16 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     })
     track.el.classList.add('selected')
     track.button.setAttribute('aria-current', 'true')
-    titleEl.textContent = track.title
-    artistEl.textContent = track.artist
+    if (!isLive()) renderMeta()
     renderTime(true)
     if (changed && onTrackChange) onTrackChange(i, track)
+  }
+
+  function renderMeta () {
+    const state = isLive() ? live.getState() : null
+    titleEl.textContent = state ? state.label : tracks[current].title
+    // the source type, not "live" again (the toggle and the dot say it)
+    artistEl.textContent = state ? (state.kind === 'mic' ? 'micro' : 'partage') : tracks[current].artist
   }
 
   // chain the mixes: when one ends, play the next one
@@ -98,6 +120,7 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     // per-frame calls skip the work while the player is not on screen;
     // wake() re-renders it with force when it comes back
     if (!force && (!visible || idle)) return
+    if (isLive()) return // no position in a live input (bar and time hidden)
     const d = duration()
     const t = dragTime !== null ? dragTime : (element.currentTime || 0)
     if (!force && t === lastShown && d === lastDuration) return
@@ -150,7 +173,7 @@ export default function createAudioControls (audio, tracks, opts = {}) {
 
   let dragPointer = null
   seekerEl.addEventListener('pointerdown', (e) => {
-    if (!duration() || (e.pointerType === 'mouse' && e.button !== 0)) return
+    if (isLive() || !duration() || (e.pointerType === 'mouse' && e.button !== 0)) return
     e.preventDefault()
     dragPointer = e.pointerId
     try { seekerEl.setPointerCapture(e.pointerId) } catch (err) {}
@@ -182,7 +205,7 @@ export default function createAudioControls (audio, tracks, opts = {}) {
 
   seekerEl.addEventListener('keydown', (e) => {
     const d = duration()
-    if (!d) return
+    if (!d || isLive()) return
     const step = e.shiftKey ? 30 : 5
     const now = element.currentTime
     let t = null
@@ -204,6 +227,14 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   // ---- play / pause ----
 
   function togglePlay () {
+    // live: the button is a stop button (back to the paused file player)
+    if (isLive()) {
+      live.stop()
+      return
+    }
+    // going back to the file cancels a live start still waiting on its
+    // prompt / picker (also the startup one of ?live=mic)
+    if (live) live.stop()
     // While the audio context is still locked (autoplay policy) the element
     // may report "playing" in silence: treat that as paused and start it.
     const locked = audio.context && audio.context.state !== 'running'
@@ -215,9 +246,10 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   }
 
   function renderPlayState () {
-    const playing = !element.paused
+    const liveNow = isLive()
+    const playing = liveNow || !element.paused
     playPauseEl.classList.toggle('is-playing', playing)
-    playPauseEl.setAttribute('aria-label', playing ? 'Pause' : 'Lecture')
+    playPauseEl.setAttribute('aria-label', liveNow ? 'Arrêter le live' : playing ? 'Pause' : 'Lecture')
     if (!playing) wake()
     else scheduleIdle()
   }
@@ -250,7 +282,8 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   ])
 
   function busy () {
-    if (element.paused || hoverCount > 0 || dragPointer !== null) return true
+    if (!isLive() && element.paused) return true
+    if (hoverCount > 0 || dragPointer !== null || menuOpen || messageTimer) return true
     return lastInputWasKeyboard && container.contains(document.activeElement)
   }
 
@@ -312,6 +345,163 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   addHoverZone(container)
   container.addEventListener('focusin', wake)
 
+  // ---- live input ----
+
+  let menuOpen = false
+  let messageTimer = null
+  let pending = false
+  let queuedMessage = null // shown by show() when the player was not on screen
+
+  // short message above the bar (errors, "live ended"); fades by itself.
+  // Before the first show() the bar is invisible: keep it for show().
+  function showMessage (text, ms = 4500) {
+    if (!messageEl || !text) return
+    if (!visible) {
+      queuedMessage = { text, ms }
+      return
+    }
+    messageEl.textContent = text
+    messageEl.classList.add('is-shown')
+    clearTimeout(messageTimer)
+    messageTimer = setTimeout(() => {
+      messageTimer = null
+      messageEl.classList.remove('is-shown')
+      scheduleIdle()
+    }, ms)
+    if (visible) wake()
+  }
+
+  function setMenu (open) {
+    if (!liveMenuEl) return
+    menuOpen = open
+    liveMenuEl.hidden = !open
+    if (live && live.supported.display) liveToggleEl.setAttribute('aria-expanded', String(open))
+    if (open) wake()
+    else scheduleIdle()
+  }
+
+  function startLive (kind, deviceId) {
+    setMenu(false)
+    if (!live || pending) return
+    pending = true
+    liveToggleEl.classList.add('is-pending')
+    live.start(kind, deviceId).then((result) => {
+      pending = false
+      liveToggleEl.classList.remove('is-pending')
+      if (result && !result.ok && result.message) showMessage(result.message)
+    }, () => {
+      pending = false
+      liveToggleEl.classList.remove('is-pending')
+    })
+  }
+
+  function toggleLive () {
+    if (!live) return
+    if (isLive()) {
+      live.stop()
+    } else if (live.supported.display) {
+      setMenu(!menuOpen)
+    } else {
+      // a single source: no menu to go through
+      startLive('mic')
+    }
+  }
+
+  function renderDevices (state) {
+    if (!liveDeviceEl) return
+    const show = state.active && state.kind === 'mic' && state.devices.length > 1
+    liveDeviceEl.hidden = !show
+    if (!show) return
+    liveDeviceEl.textContent = ''
+    state.devices.forEach((d) => {
+      const option = liveDeviceEl.appendChild(document.createElement('option'))
+      option.value = d.deviceId
+      option.textContent = d.label
+    })
+    if (state.deviceId) liveDeviceEl.value = state.deviceId
+  }
+
+  function renderLive (state) {
+    container.classList.toggle('is-live', state.active)
+    liveToggleEl.setAttribute('aria-pressed', String(state.active))
+    liveToggleEl.setAttribute('aria-label', state.active ? 'Quitter le live (L)' : 'Entrée live (L)')
+    seekerEl.tabIndex = state.active ? -1 : 0
+    seekerEl.setAttribute('aria-hidden', String(state.active))
+    renderMeta()
+    renderDevices(state)
+    renderPlayState()
+    if (!state.active) renderTime(true)
+  }
+
+  if (live && liveEl) {
+    // only offer it when a source can work; an insecure page keeps it so
+    // the https hint can be shown
+    liveEl.hidden = !(live.supported.mic || live.supported.display || window.isSecureContext === false)
+    // no chooser without a second source: a click starts the mic directly
+    if (!live.supported.display) {
+      liveToggleEl.removeAttribute('aria-haspopup')
+      liveToggleEl.removeAttribute('aria-expanded')
+    }
+    if (liveMenuEl) {
+      liveMenuEl.querySelectorAll('[data-live]').forEach((button) => {
+        if (!live.supported[button.dataset.live]) button.hidden = true
+        button.addEventListener('click', () => startLive(button.dataset.live))
+      })
+    }
+    liveToggleEl.addEventListener('click', (e) => {
+      toggleLive()
+      // as for the track pills: a mouse click must not leave focus on the
+      // button, or Space would re-activate it (isTypingTarget)
+      if (e.detail > 0 && !menuOpen) liveToggleEl.blur()
+      // opened from the keyboard: move into the menu (Escape comes back)
+      if (e.detail === 0 && menuOpen) {
+        const first = liveMenuEl.querySelector('[data-live]:not([hidden])')
+        if (first) first.focus()
+      }
+    })
+    if (liveDeviceEl) {
+      liveDeviceEl.addEventListener('change', () => {
+        if (!liveDeviceEl.value) return
+        // a start is already waiting: this choice is dropped, so put the
+        // select back on the device that really feeds the analysers
+        if (pending) {
+          liveDeviceEl.value = live.getState().deviceId
+          return
+        }
+        startLive('mic', liveDeviceEl.value)
+      })
+    }
+    // the menu closes on any press outside it, and on Escape
+    window.addEventListener('pointerdown', (e) => {
+      if (menuOpen && !liveEl.contains(e.target)) setMenu(false)
+    }, true)
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && menuOpen) {
+        setMenu(false)
+        liveToggleEl.focus()
+        return
+      }
+      // L toggles the live mic once the player is on screen
+      if (e.code !== 'KeyL' || e.repeat || !visible || liveEl.hidden) return
+      // only real text fields block it: L does nothing on a focused button,
+      // link or slider (unlike Space)
+      if (e.ctrlKey || e.metaKey || e.altKey || isTextField(e.target)) return
+      e.preventDefault()
+      setMenu(false)
+      if (isLive()) live.stop()
+      else startLive('mic')
+    })
+    live.subscribe((state) => {
+      if (state.reason === 'devices') {
+        renderDevices(state)
+        return
+      }
+      renderLive(state)
+      if (state.reason === 'ended') showMessage('Live terminé — retour au lecteur')
+      if (visible) wake()
+    })
+  }
+
   // initial selection, once every piece of state above exists
   setTrack(0)
   renderPlayState()
@@ -329,6 +519,11 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     container.classList.add('is-visible')
     wake()
     renderTime(true)
+    if (queuedMessage) {
+      const { text, ms } = queuedMessage
+      queuedMessage = null
+      showMessage(text, ms)
+    }
   }
 
   return {
@@ -338,6 +533,7 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     wake,
     addHoverZone,
     isIdle: () => idle,
+    showMessage,
     getCurrentTrack: () => current
   }
 }

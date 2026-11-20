@@ -10,6 +10,7 @@ import createAnalysis from './audio-analysis'
 import createCamera, { CAMERA_SHOTS } from './camera'
 import createTitleCard from './title-card'
 import createAudioControls, { isTextField, prefersReducedMotion } from './audio-controls'
+import createLiveInput from './live-input'
 import createRenderBloom from './render-bloom'
 import createRenderPost, { AGX_LOOKS } from './render-post'
 import createRenderLut from './render-lut'
@@ -171,6 +172,13 @@ const audio = createAudio(tracks[0].path)
 // once per frame in the render loop, read by everything that reacts to sound
 const analysis = createAnalysis(audio)
 const features = analysis.features
+// live input (mic / virtual device / shared tab) feeding the same analysers;
+// switching source starts the sections and tempo from scratch
+const live = createLiveInput(audio)
+live.subscribe((state) => {
+  if (state.reason !== 'devices') analysis.resetStructure()
+})
+const liveSettings = { gain: 1 }
 
 // per-track cosine palette, crossfaded on track change, drifting with energy
 const palette = createPalette()
@@ -202,7 +210,8 @@ fontsReady.then(() => {
       palette.setTrack(i)
       // new mix: its sections and tempo start from scratch
       analysis.resetStructure()
-    }
+    },
+    live
   })
 
   function loop () {
@@ -223,7 +232,18 @@ fontsReady.then(() => {
     // the WebGL canvas) and fades in through `intro` while the title
     // particles fly off and the title canvas fades out.
     introStart = null
-    playWhenAllowed()
+    // ?live=mic: listen to the room / a virtual device instead of the mixes
+    // (getUserMedia needs no gesture; the context unlock is handled by
+    // playWhenAllowed, which counts a live input as playing). On failure,
+    // the mixes play as usual.
+    if (startLive === 'mic') {
+      live.start('mic').then((result) => {
+        if (!result.ok && result.message) audioControls.showMessage(result.message)
+        playWhenAllowed()
+      }, () => playWhenAllowed())
+    } else {
+      playWhenAllowed()
+    }
     camera.start()
     startLoop()
     window.requestAnimationFrame(loop)
@@ -261,9 +281,14 @@ function introAmount (time) {
 // pointerup / touchend / click, never pointerdown (Chrome only grants
 // activation on pointerdown for the mouse). The listeners stay until a
 // play() really starts the sound, so a rejected try does not use them up.
+const startLive = (() => {
+  try { return new URLSearchParams(window.location.search).get('live') } catch (e) { return null }
+})()
+
 function playWhenAllowed () {
+  // a live input counts as playing (the element is paused on purpose)
   const isRunning = () =>
-    !audio.element.paused &&
+    audio.isPlaying() &&
     (!audio.context || audio.context.state === 'running')
   audio.play().then((started) => {
     if (started || isRunning()) return
@@ -282,6 +307,9 @@ function playWhenAllowed () {
       // straight back off
       if (e.target && e.target.closest && e.target.closest('.controls-container')) return
       if (e.type === 'keydown' && (e.code === 'Space' || e.key === 'Escape')) return
+      // L starts the live mic itself (and resumes the context): starting
+      // the file here too would blip it before the mic takes over
+      if (e.type === 'keydown' && e.code === 'KeyL') return
       pending = true
       audio.play().then((ok) => {
         pending = false
@@ -820,6 +848,10 @@ drift.add(audioGUI.add(analysis.opts, 'agcAmount', 0, 1).step(0.01))
 audioGUI.add(analysis.opts, 'agcRelease', 1, 60).step(0.5)
 audioGUI.add(analysis.opts, 'maxGain', 1, 10).step(0.1)
 audioGUI.add(analysis.opts, 'noiseGate', 0, 0.3).step(0.005)
+// lifts a quiet mic before the analysis (live inputs only; the AGC handles
+// the rest, the file-mode tuning is untouched)
+audioGUI.add(liveSettings, 'gain', 0.5, 8).step(0.1).name('live gain')
+  .onChange((v) => audio.setLiveGain(v))
 audioGUI.add(analysis.opts, 'kickSensitivity', 0, 5).step(0.05)
 audioGUI.add(analysis.opts, 'kickMinFlux', 0, 0.1).step(0.001)
 audioGUI.add(analysis.opts, 'kickRefractory', 0.05, 1).step(0.01)
@@ -1723,7 +1755,7 @@ function renderFrame (time, dt) {
   renderHistory.update({
     dt,
     features,
-    running: !audio.element.paused,
+    running: audio.isPlaying(),
     view: frameView,
     seconds: settings.historySeconds,
     snap: cutNow
