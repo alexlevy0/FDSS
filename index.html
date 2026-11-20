@@ -36,6 +36,7 @@
       --gutter: clamp(1rem, 3.5vw, 2.25rem);
       --tap: 44px;
       --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+      --live-red: #ff3b30;
     }
 
     html,
@@ -155,11 +156,12 @@
     }
 
     .player {
+      position: relative;
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+      grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
       grid-template-areas:
-        "seek seek seek seek seek"
-        "play meta tracks time link";
+        "seek seek seek seek seek seek"
+        "play meta tracks live time link";
       align-items: center;
       column-gap: clamp(0.5rem, 2vw, 1.5rem);
       max-width: 90rem;
@@ -268,11 +270,20 @@
     }
 
     .play-pause .icon-pause,
+    .play-pause .icon-stop,
     .play-pause.is-playing .icon-play {
       display: none;
     }
 
     .play-pause.is-playing .icon-pause {
+      display: block;
+    }
+
+    .is-live .play-pause.is-playing .icon-pause {
+      display: none;
+    }
+
+    .is-live .play-pause.is-playing .icon-stop {
       display: block;
     }
 
@@ -363,7 +374,152 @@
       filter: none;
     }
 
-    /* phones: tracks on their own line below */
+    /* ---------- live input ---------- */
+
+    .live {
+      grid-area: live;
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .live[hidden] {
+      display: none;
+    }
+
+    .live-toggle,
+    .live-menu button {
+      min-height: var(--tap);
+      padding: 0 0.7em;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--ink-dim);
+      cursor: pointer;
+      font-size: 0.78em;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      transition: color 200ms ease, background-color 200ms ease, opacity 200ms ease;
+    }
+
+    .live-toggle:hover,
+    .live-toggle[aria-expanded="true"],
+    .live-menu button:hover {
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .live-toggle[aria-pressed="true"] {
+      color: var(--live-red);
+    }
+
+    .live-toggle.is-pending {
+      opacity: 0.5;
+      cursor: progress;
+    }
+
+    .live-menu {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 0.25rem);
+      display: flex;
+      flex-direction: column;
+      padding: 0.25rem;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.82);
+      box-shadow: 0 0 0 1px var(--ink-faint);
+    }
+
+    .live-menu[hidden],
+    .live-menu button[hidden],
+    .live-device[hidden] {
+      display: none;
+    }
+
+    .live-menu button {
+      text-align: left;
+      border-radius: 8px;
+      letter-spacing: 0.08em;
+    }
+
+    .live-device {
+      max-width: 11rem;
+      min-height: 2rem;
+      padding: 0 0.4em;
+      border: 0;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--ink);
+      font: inherit;
+      font-size: 0.8em;
+    }
+
+    .live-device option {
+      background: #000;
+    }
+
+    .live-dot {
+      display: none;
+      width: 0.5em;
+      height: 0.5em;
+      margin-right: 0.6em;
+      vertical-align: 0.12em;
+      border-radius: 50%;
+      background: var(--live-red);
+      animation: live-pulse 1.6s ease-in-out infinite;
+    }
+
+    .is-live .live-dot {
+      display: inline-block;
+    }
+
+    @keyframes live-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.25; }
+    }
+
+    /* no position in a live input; the mixes stay there to go back */
+    .is-live .seeker,
+    .is-live .elapsed-time {
+      visibility: hidden;
+    }
+
+    .is-live .track.selected button {
+      color: var(--ink-dim);
+      background: transparent;
+    }
+
+    /* sits in the transparent top of the gradient: its own backing keeps it
+       readable over bright visuals */
+    .live-message {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: calc(100% + 0.5rem);
+      display: block;
+      width: fit-content;
+      max-width: 100%;
+      margin: 0 auto;
+      padding: 0.35em 0.8em;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.72);
+      text-align: center;
+      color: var(--ink);
+      opacity: 0;
+      transition: opacity 600ms ease;
+      pointer-events: none;
+    }
+
+    .live-message.is-shown {
+      opacity: 1;
+      transition-duration: 200ms;
+    }
+
+    /* phones: tracks on their own line below, the live controls at its
+       right end. Both share the full-width "tracks" area so a wide device
+       picker never widens the time / link columns (and crushes the title) */
     @media (max-width: 40rem) {
       .player {
         grid-template-columns: auto minmax(0, 1fr) auto auto;
@@ -373,12 +529,24 @@
           "tracks tracks tracks tracks";
       }
 
+      .live {
+        grid-area: tracks;
+        justify-self: end;
+        justify-content: flex-end;
+        min-width: 0;
+      }
+
+      .live-device {
+        max-width: 7rem;
+      }
+
       .now-playing .artist {
         display: block;
         margin-left: 0;
       }
 
       .track-selector {
+        justify-self: start;
         margin-left: -0.6em;
       }
     }
@@ -409,8 +577,13 @@
       .controls-container.is-visible,
       .controls-container.is-visible.is-idle,
       .seeker-track,
-      .seeker-thumb {
+      .seeker-thumb,
+      .live-message {
         transition: none !important;
+      }
+
+      .live-dot {
+        animation: none;
       }
     }
   </style>
@@ -450,17 +623,31 @@
           <rect x="4" y="3" width="3.2" height="12" rx="0.8" />
           <rect x="10.8" y="3" width="3.2" height="12" rx="0.8" />
         </svg>
+        <svg class="icon-stop" viewBox="0 0 18 18" aria-hidden="true">
+          <rect x="4" y="4" width="10" height="10" rx="1.2" />
+        </svg>
       </button>
       <div class="now-playing" aria-live="polite">
+        <span class="live-dot" aria-hidden="true"></span>
         <span class="title"></span>
         <span class="artist"></span>
       </div>
       <ol class="track-selector" aria-label="Mixes"></ol>
+      <div class="live" hidden>
+        <button type="button" class="live-toggle" aria-haspopup="true" aria-expanded="false"
+          aria-pressed="false" aria-label="Entrée live (L)">live</button>
+        <div class="live-menu" hidden>
+          <button type="button" data-live="mic">Micro</button>
+          <button type="button" data-live="display">Onglet ou écran</button>
+        </div>
+        <select class="live-device" aria-label="Entrée audio" hidden></select>
+      </div>
       <div class="elapsed-time" aria-label="Temps écoulé et durée totale">
         <span class="current">0:00</span> / <span class="total">0:00</span>
       </div>
       <a href="https://www.instagram.com/alexlevy0/" target="_blank" rel="noopener" class="instagram-link"
         aria-label="Instagram (nouvel onglet)">🕴</a>
+      <div class="live-message" role="status" aria-live="polite"></div>
     </div>
   </section>
   <script type="module" src="/src/index.js"></script>
