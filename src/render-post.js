@@ -3,10 +3,59 @@
 //     ACES filmic tone mapping -> gamma, into an 8-bit buffer that keeps the
 //     luma in alpha for FXAA
 //     (plus the god rays, render-godrays, added like the bloom)
-//  B) FXAA -> vignette -> film grain + triangular dither, to the canvas
+//     (then the cinematic layers, all linear and before tone mapping:
+//     halation = a wide bloom level made red/orange, anamorphic flares from
+//     render-flares tinted slightly blue, and lens dirt lit by the bloom)
+//  B) FXAA -> section colour grading (lift / gamma / gain, saturation,
+//     temperature) -> vignette -> film grain + triangular dither, to the canvas
 // Chromatic aberration is done in A, on the HDR samples, so FXAA smooths its
 // fringes as well; it is 0 at the centre and grows toward the corners.
 import { FRAG_PRECISION, FULLSCREEN_VERT, BLOOM_CODEC } from './render-bloom'
+
+const lumaNormalise = (c) => {
+  const l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+  return c.map((x) => x / l)
+}
+// film halation: red / orange; anamorphic streaks: a cool blue
+const HALATION_TINT = lumaNormalise([1, 0.36, 0.14])
+const FLARES_TINT = lumaNormalise([0.55, 0.78, 1.15])
+const finiteMax0 = (x) => (Number.isFinite(x) ? Math.max(0, x) : 0)
+
+// grade: { lift, gamma, gain, saturation, warmth } or null (= identity).
+// warmth -1..1 tilts red against blue at constant luminance. Writes the
+// grading uniforms into `out` (reused every frame: no allocation).
+function gradeUniforms (grade, out) {
+  const identity = () => {
+    out.gradeOn = 0
+    out.lift = 0
+    out.gammaInv = 1
+    out.gain = 1
+    out.saturation = 1
+    out.gradeTint[0] = out.gradeTint[1] = out.gradeTint[2] = 1
+  }
+  if (!grade) return identity()
+  const f = (x, d, lo, hi) => (Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d)
+  const lift = f(grade.lift, 0, -0.2, 0.2)
+  const gamma = f(grade.gamma, 1, 0.3, 3)
+  const gain = f(grade.gain, 1, 0, 3)
+  const saturation = f(grade.saturation, 1, 0, 3)
+  const warmth = f(grade.warmth, 0, -1, 1)
+  const on =
+    Math.abs(lift) > 1e-4 || Math.abs(gamma - 1) > 1e-4 || Math.abs(gain - 1) > 1e-4 ||
+    Math.abs(saturation - 1) > 1e-4 || Math.abs(warmth) > 1e-4
+  if (!on) return identity()
+  const t = 0.15 * warmth
+  // lumaNormalise inline: luminance of (1 + t, 1, 1 - t), > 0 for |t| <= 0.15
+  const l = 0.2126 * (1 + t) + 0.7152 + 0.0722 * (1 - t)
+  out.gradeOn = 1
+  out.lift = lift
+  out.gammaInv = 1 / gamma
+  out.gain = gain
+  out.saturation = saturation
+  out.gradeTint[0] = (1 + t) / l
+  out.gradeTint[1] = 1 / l
+  out.gradeTint[2] = (1 - t) / l
+}
 
 export default function createRenderPost (regl, { hdr = false } = {}) {
   const defines = hdr ? '' : '#define BLOOM_ENCODED\n'
@@ -34,7 +83,18 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
       uniform float godraysIntensity;
       uniform float exposure;
       uniform float ca;
+      uniform sampler2D halo; // wide bloom level (bloom codec)
+      uniform float halation;
+      uniform vec3 halationTint; // luminance-normalised
+      uniform sampler2D flares; // render-flares (bloom codec)
+      uniform float flaresIntensity;
+      uniform vec3 flaresTint; // luminance-normalised
+      uniform sampler2D dirt; // lens dirt, uint8 rgba
+      uniform float lensDirt;
+      uniform vec2 dirtScale; // keeps the dirt texture square on screen
       ${BLOOM_CODEC}
+
+      const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
       vec3 hdrAt(vec2 p) {
         vec3 s = pow(max(texture2D(scene, p).rgb, vec3(1e-6)), vec3(2.2));
@@ -70,6 +130,28 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
         if (godraysIntensity > 1e-4) {
           col += bloomDecode(texture2D(godrays, uv)) * godraysIntensity;
         }
+        // halation: the wide glow, by luminance, red-shifted like the light
+        // scattered back through film
+        if (halation > 1e-4) {
+          float hl = dot(bloomDecode(texture2D(halo, uv)), LUMA);
+          col += halationTint * (min(hl, 64.0) * halation);
+        }
+        // anamorphic streaks, by luminance, slightly blue
+        if (flaresIntensity > 1e-4) {
+          float fl = dot(bloomDecode(texture2D(flares, uv)), LUMA);
+          col += flaresTint * (min(fl, 64.0) * flaresIntensity);
+        }
+        // lens dirt: lit by the bloom only, gated so faint glow (the dark
+        // gaps of the fabric) never shows it
+        if (lensDirt > 1e-4) {
+          vec3 bl = bloomDecode(texture2D(bloom, uv)) * bloomIntensity;
+          float gate = smoothstep(0.02, 0.3, dot(bl, LUMA));
+          vec3 d = texture2D(dirt, (uv - 0.5) * dirtScale + 0.5).rgb;
+          col += min(bl, vec3(64.0)) * d * (gate * lensDirt);
+        }
+        // never hand NaN / negatives to the tone curve
+        col = max(col, vec3(0.0));
+        if (!(dot(col, LUMA) == dot(col, LUMA))) col = vec3(0.0);
         col = aces(col * exposure);
         col = pow(col, vec3(1.0 / 2.2));
         gl_FragColor = vec4(col, dot(col, vec3(0.299, 0.587, 0.114)));
@@ -83,7 +165,16 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
       godrays: regl.prop('godrays'),
       godraysIntensity: regl.prop('godraysIntensity'),
       exposure: regl.prop('exposure'),
-      ca: regl.prop('ca')
+      ca: regl.prop('ca'),
+      halo: regl.prop('halo'),
+      halation: regl.prop('halation'),
+      halationTint: regl.prop('halationTint'),
+      flares: regl.prop('flares'),
+      flaresIntensity: regl.prop('flaresIntensity'),
+      flaresTint: regl.prop('flaresTint'),
+      dirt: regl.prop('dirt'),
+      lensDirt: regl.prop('lensDirt'),
+      dirtScale: regl.prop('dirtScale')
     },
     count: 3,
     depth: { enable: false },
@@ -103,6 +194,12 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
       uniform float vignetteStart;
       uniform float grain;
       uniform float seed;
+      uniform float gradeOn;
+      uniform float lift;
+      uniform float gammaInv; // 1 / gamma
+      uniform float gain;
+      uniform float saturation;
+      uniform vec3 gradeTint; // temperature, luminance-normalised
 
       // FXAA (after Timothy Lottes' FXAA 2 / the common "fxaa.glsl" port)
       vec3 fxaa(vec2 p) {
@@ -142,6 +239,15 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
       void main() {
         vec3 col = fxaaOn > 0.5 ? fxaa(uv) : texture2D(tex, uv).rgb;
 
+        // section colour grading (uniform branch: off = untouched groove)
+        if (gradeOn > 0.5) {
+          col = max(gain * (col + lift * (vec3(1.0) - col)), vec3(0.0));
+          col = pow(col + 1e-6, vec3(gammaInv));
+          float gLum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+          col = mix(vec3(gLum), col, saturation) * gradeTint;
+          col = clamp(col, 0.0, 1.0);
+        }
+
         // vignette: 0 at the centre, 1 in the corners
         float d = length(uv - 0.5) * 1.41421356;
         col *= 1.0 - vignette * smoothstep(vignetteStart, 1.0, d);
@@ -165,7 +271,13 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
       vignette: regl.prop('vignette'),
       vignetteStart: regl.prop('vignetteStart'),
       grain: regl.prop('grain'),
-      seed: regl.prop('seed')
+      seed: regl.prop('seed'),
+      gradeOn: regl.prop('gradeOn'),
+      lift: regl.prop('lift'),
+      gammaInv: regl.prop('gammaInv'),
+      gain: regl.prop('gain'),
+      saturation: regl.prop('saturation'),
+      gradeTint: regl.prop('gradeTint')
     },
     count: 3,
     depth: { enable: false },
@@ -173,6 +285,11 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
   })
 
   let frame = 0
+  // reused every frame (no per-frame allocation)
+  const setVec2 = (v, x, y) => { v[0] = x; v[1] = y; return v }
+  const dirtScale = new Float32Array(2)
+  const finalTexel = new Float32Array(2)
+  const finalProps = { gradeTint: new Float32Array([1, 1, 1]) }
   function render ({
     scene,
     bloom,
@@ -186,7 +303,14 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
     fxaa,
     vignette,
     vignetteStart,
-    grain
+    grain,
+    halo = null,
+    halation = 0,
+    flares = null,
+    flaresIntensity = 0,
+    dirt = null,
+    lensDirt = 0,
+    grade = null
   }) {
     const w = Math.max(1, width | 0)
     const h = Math.max(1, height | 0)
@@ -200,18 +324,30 @@ export default function createRenderPost (regl, { hdr = false } = {}) {
       godrays: godrays || bloom,
       godraysIntensity: godrays ? Math.max(0, godraysIntensity) : 0,
       exposure,
-      ca: Math.max(0, ca)
+      ca: Math.max(0, ca),
+      // any valid texture when an effect is off (never sampled then)
+      halo: halo || bloom,
+      halation: halo ? finiteMax0(halation) : 0,
+      halationTint: HALATION_TINT,
+      flares: flares || bloom,
+      flaresIntensity: flares ? finiteMax0(flaresIntensity) : 0,
+      flaresTint: FLARES_TINT,
+      dirt: dirt || bloom,
+      lensDirt: dirt ? finiteMax0(lensDirt) : 0,
+      // square texels of the dirt on screen, covering the long side
+      dirtScale: setVec2(dirtScale, w >= h ? 1 : w / h, w >= h ? h / w : 1)
     })
     frame = (frame + 1) % 251
-    finalPass({
-      texel: [1 / w, 1 / h],
-      fxaaOn: fxaa ? 1 : 0,
-      vignette,
-      // smoothstep() is undefined when edge0 >= edge1
-      vignetteStart: Math.min(vignetteStart, 0.99),
-      grain,
-      seed: frame * 7.13
-    })
+    const fp = finalProps
+    fp.texel = setVec2(finalTexel, 1 / w, 1 / h)
+    fp.fxaaOn = fxaa ? 1 : 0
+    fp.vignette = vignette
+    // smoothstep() is undefined when edge0 >= edge1
+    fp.vignetteStart = Math.min(vignetteStart, 0.99)
+    fp.grain = grain
+    fp.seed = frame * 7.13
+    gradeUniforms(grade, fp)
+    finalPass(fp)
   }
 
   function destroy () {

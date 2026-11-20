@@ -1,4 +1,5 @@
 import createCamera from '3d-view-controls'
+import lookAtMatrix from 'gl-mat4/lookAt'
 
 // Roaming camera on top of 3d-view-controls.
 //
@@ -26,45 +27,78 @@ const TAU = Math.PI * 2
 // of shot never swings the camera around): ellipse radii rx / ry, eye
 // height z, look-at height tz, angular speed factor and drift factor.
 // `t` is the time since the shot started (the dive closes in over time).
+// lookAhead moves the look-at point that far past the centre, away from
+// the eye, so the shot also takes in the history landscape that lies on
+// the far side of the grid (0 = look at the centre).
 // A switch blends the parameters of the two paths (both keep moving) with
-// an eased curve, so there is never a cut.
+// an eased curve, so there is never a cut -- except cut(), the hard cuts
+// the director asks for on bars during drops: an instant switch to another
+// shot, with a deterministic variation of its path (see cutVariation()).
 const SHOTS = {
   // the original ellipse, rising and falling once per revolution
   classic (o, rads) {
     o.rx = 1.5; o.ry = 2.7
     o.z = (Math.sin(rads) * 0.5 + 0.5) * 3 + 0.5
-    o.tz = 0; o.speed = 1; o.drift = 1
+    o.tz = 0; o.speed = 1; o.drift = 1; o.lookAhead = 0
   },
   // high, slow and wide: the whole grid in view
   wide (o, rads) {
     o.rx = 3.3; o.ry = 3.8
     o.z = 2.9 + 0.5 * Math.sin(rads * 0.5 + 1)
-    o.tz = 0; o.speed = 0.5; o.drift = 1.2
+    o.tz = 0; o.speed = 0.5; o.drift = 1.2; o.lookAhead = 0.35
   },
   // almost straight down, slowly turning (never exactly vertical: the
   // controls keep a z-up camera)
   top (o) {
     o.rx = 0.75; o.ry = 0.9
     o.z = 4.3
-    o.tz = 0; o.speed = 0.55; o.drift = 0.5
+    o.tz = 0; o.speed = 0.55; o.drift = 0.5; o.lookAhead = 0
   },
   // low grazing fly-over, faster, just above the peaks
   graze (o, rads) {
     o.rx = 1.85; o.ry = 2.25
     o.z = 0.55 + 0.12 * Math.sin(rads * 3)
-    o.tz = 0.1; o.speed = 1.35; o.drift = 0.45
+    o.tz = 0.1; o.speed = 1.35; o.drift = 0.45; o.lookAhead = 0.25
   },
   // slow dive toward the centre, closing in over ~20 s then holding
   dive (o, rads, t) {
     const p = 1 - Math.exp(-t / 22)
     o.rx = 3.0 - 1.8 * p; o.ry = 3.3 - 2.0 * p
     o.z = 3.4 - 2.4 * p
-    o.tz = 0; o.speed = 0.7 + 0.5 * p; o.drift = 0.7
+    o.tz = 0; o.speed = 0.7 + 0.5 * p; o.drift = 0.7; o.lookAhead = 0
   }
 }
 export const CAMERA_SHOTS = Object.keys(SHOTS)
-const PARAMS = ['rx', 'ry', 'z', 'tz', 'speed', 'drift']
-const newParams = () => ({ rx: 0, ry: 0, z: 0, tz: 0, speed: 1, drift: 1 })
+const PARAMS = ['rx', 'ry', 'z', 'tz', 'speed', 'drift', 'lookAhead']
+const newParams = () => ({ rx: 0, ry: 0, z: 0, tz: 0, speed: 1, drift: 1, lookAhead: 0 })
+
+// per-shot path variation of a hard cut (identity: no variation)
+const newVariation = () => ({ rx: 1, ry: 1, z: 1, tz: 0, speed: 1, lookAhead: 1 })
+function resetVariation (v) {
+  v.rx = 1; v.ry = 1; v.z = 1; v.tz = 0; v.speed = 1; v.lookAhead = 1
+}
+const isIdentity = (v) =>
+  v.rx === 1 && v.ry === 1 && v.z === 1 && v.tz === 0 && v.speed === 1 && v.lookAhead === 1
+function applyVariation (o, v) {
+  o.rx *= v.rx
+  o.ry *= v.ry
+  o.z *= v.z // cutVariation keeps it >= 0.9 (graze skims the peaks)
+  o.tz += v.tz
+  o.speed *= v.speed
+  o.lookAhead *= v.lookAhead
+  return o
+}
+
+// small deterministic random source (mulberry32) from an integer seed
+function seededRandom (seed) {
+  let a = (seed | 0) ^ 0x9e3779b9
+  return () => {
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
 
 export default function createRoamingCamera (canvas, initialEye, initialTarget) {
   const settings = {
@@ -76,7 +110,9 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     nudgeFrequency: 2.4, // Hz of the kick spring
     nudgeDamping: 0.55, // damping ratio of the kick spring (<1 overshoots a bit)
     shots: true, // let the director switch shots (off: back to 'classic')
-    shotTransition: 7 // seconds of the eased blend between two shots
+    lookAhead: 1, // scales each shot's look past the centre (0 = always the centre)
+    shotTransition: 7, // seconds of the eased blend between two shots
+    cutVariation: 1 // 0..1, how far a hard cut varies its shot's path
   }
 
   const camera = createCamera(canvas, {
@@ -101,6 +137,10 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
   const fromFrozen = newParams()
   let blendT = 1
   let blendDuration = 7
+  // path variations of the current shot and of the shot blended from (only
+  // non-identity after a hard cut; a later eased switch blends them out)
+  const curVar = newVariation()
+  const fromVar = newVariation()
   const pCur = newParams()
   const pFrom = newParams()
   const params = newParams()
@@ -110,27 +150,35 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
   // blended shot parameters at angle rads
   function shotParams (out, rads) {
     SHOTS[shot](pCur, rads, shotTime)
+    applyVariation(pCur, curVar)
     if (blendT >= 1) {
       for (const k of PARAMS) out[k] = pCur[k]
       return out
     }
-    if (fromShot) SHOTS[fromShot](pFrom, rads, fromTime)
+    if (fromShot) {
+      SHOTS[fromShot](pFrom, rads, fromTime)
+      applyVariation(pFrom, fromVar)
+    }
     const src = fromShot ? pFrom : fromFrozen
     const s = ease(blendT)
     for (const k of PARAMS) out[k] = src[k] + (pCur[k] - src[k]) * s
     return out
   }
 
+  // eased switch to a shot; switching to the current shot only blends its
+  // cut variation out (and keeps its own time)
   function setShot (name, duration) {
     if (!SHOTS[name]) return
-    if (name === shot) return
+    const same = name === shot
+    if (same && isIdentity(curVar)) return
     const d = duration === undefined ? settings.shotTransition : duration
     if (state === 'user' || !(d > 0)) {
       // the user holds the camera (resuming eases back anyway), or no blend
+      if (!same) shotTime = 0
       shot = name
-      shotTime = 0
       blendT = 1
       fromShot = null
+      resetVariation(curVar)
       return
     }
     if (blendT < 1) {
@@ -139,11 +187,48 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     } else {
       fromShot = shot
       fromTime = shotTime
+      Object.assign(fromVar, curVar)
     }
+    resetVariation(curVar)
+    if (!same) shotTime = 0
     shot = name
-    shotTime = 0
     blendT = 0
     blendDuration = d
+  }
+
+  // the variation of a hard cut, from an integer seed (amount 0..1)
+  function cutVariation (out, rand, amount) {
+    const k = Math.min(Math.max(amount, 0), 1)
+    const s = 1 + k * (rand() * 0.4 - 0.2) // 0.8 .. 1.2 closer / further
+    out.rx = s * (1 + k * (rand() * 0.16 - 0.08))
+    out.ry = s * (1 + k * (rand() * 0.16 - 0.08))
+    out.z = 1 + k * (rand() * 0.45 - 0.1) // 0.9 .. 1.35 (never much lower)
+    out.tz = k * (rand() * 0.16 - 0.04)
+    out.speed = 1 + k * (rand() * 0.5 - 0.15)
+    out.lookAhead = 1 + k * (rand() * 0.8 - 0.4)
+    return out
+  }
+
+  // Hard cut: switches to `name` at once (no blend), with a variation of
+  // its path drawn from `seed` (same seed, same cut): its scale, height,
+  // look-at height, speed, look-ahead, plus a jump along the path and in
+  // the drift pattern. Only while roaming: never while the user holds the
+  // camera or while it eases back to the path. Returns true when it cut.
+  function cut (name, seed) {
+    if (!started || state !== 'roaming' || !SHOTS[name]) return false
+    const rand = seededRandom(seed)
+    cutVariation(curVar, rand, settings.cutVariation)
+    const k = Math.min(Math.max(settings.cutVariation, 0), 1)
+    // jump along the path: 20 to 60 degrees, either way
+    const dir = rand() < 0.5 ? -1 : 1
+    rads += dir * k * (0.35 + rand() * 0.7)
+    rads -= TAU * Math.floor(rads / TAU)
+    roamTime += k * rand() * 40
+    shot = name
+    shotTime = 0
+    blendT = 1
+    fromShot = null
+    return true
   }
 
   function stepShot (dt) {
@@ -198,10 +283,14 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     out[2] += tmpDrift[2]
     return out
   }
-  // call after pathEye (uses the shot params it computed)
-  function pathTarget (out, t) {
+  // call after pathEye (uses the shot params it computed); r: the path
+  // angle the eye was computed at (the eye sits at ~(sin r, cos r))
+  function pathTarget (out, t, r) {
     targetDrift(out, t, settings.drift)
     out[2] += params.tz
+    const la = params.lookAhead * Math.max(0, settings.lookAhead)
+    out[0] -= Math.sin(r) * la
+    out[1] -= Math.cos(r) * la
     return out
   }
 
@@ -220,6 +309,16 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
 
   const eye = [0, 0, 0]
   const target = [0, 0, 0]
+  // eye / target hold this frame's finite, distinct pose (getMatrix)
+  let poseValid = false
+  function checkPose () {
+    let d = 0
+    for (let i = 0; i < 3; i++) {
+      if (!isFinite(eye[i]) || !isFinite(target[i])) return false
+      d += (eye[i] - target[i]) * (eye[i] - target[i])
+    }
+    return d > 1e-8
+  }
   const tmp = [0, 0, 0]
   const cameraUp = new Float32Array(3)
 
@@ -369,8 +468,9 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
       shotParams(params, rads)
       rads = (rads + settings.roamSpeed * params.speed * dt) % TAU
       pathEye(eye, rads, roamTime)
-      pathTarget(target, roamTime)
+      pathTarget(target, roamTime, rads)
       camera.lookAt(eye, target)
+      poseValid = checkPose()
     } else if (state === 'resuming') {
       resumeT += dt / Math.max(0.01, settings.resumeDuration)
       const s = smooth(Math.min(1, resumeT))
@@ -380,16 +480,31 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
       rads = (rads + settings.roamSpeed * params.speed * dt * s) % TAU
       pathEye(tmp, rads, roamTime)
       for (let i = 0; i < 3; i++) eye[i] = resumeEye[i] + (tmp[i] - resumeEye[i]) * s
-      pathTarget(tmp, roamTime)
+      pathTarget(tmp, roamTime, rads)
       for (let i = 0; i < 3; i++) target[i] = resumeTarget[i] + (tmp[i] - resumeTarget[i]) * s
       camera.lookAt(eye, target)
+      poseValid = checkPose()
       if (resumeT >= 1) state = 'roaming'
     }
   }
 
   const outMatrix = new Float32Array(16)
+  // The controls' own matrix is interpolated ~32 ms behind the poses we
+  // set (3d-view-controls' delay): after a hard cut it would show one or two
+  // in-between frames, a whip pan instead of a cut. So while we drive the
+  // camera (roaming / resuming) the matrix comes straight from this frame's
+  // eye / target (z up, as the controls keep it); the controls' matrix is
+  // used while the user holds the camera. Resuming starts from the pose the
+  // controls showed, so only grabbing the camera can step it by those
+  // ~32 ms of roaming motion (sub-degree), and the user is moving it then.
+  const directMatrix = new Float32Array(16)
+  const zUp = [0, 0, 1]
   function getMatrix () {
-    const m = camera.matrix
+    let m = camera.matrix
+    if (started && state !== 'user' && poseValid) {
+      lookAtMatrix(directMatrix, eye, target, zUp)
+      m = directMatrix
+    }
     for (let i = 0; i < 16; i++) outMatrix[i] = m[i]
     // view' = T(offset) * view : translate in view space
     outMatrix[12] += nudgeOffset[0]
@@ -413,7 +528,9 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     getCenter,
     getState,
     setShot,
+    cut,
     getShot: () => shot,
+    hasVariation: () => !isIdentity(curVar),
     shots: CAMERA_SHOTS,
     nudge,
     kick: nudge,

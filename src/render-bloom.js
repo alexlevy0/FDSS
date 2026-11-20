@@ -63,6 +63,8 @@ export default function createRenderBloom (regl, { type = 'uint8', hdr = false, 
     })
 
   // down[i] is 1/2^(i+1) of the source size; up[i] matches down[i]
+  // (level 1 = quarter res; level 0 when the chain is too short)
+  const haloLevel = Math.max(0, Math.min(1, levels - 2))
   const down = []
   const up = []
   for (let i = 0; i < levels; i++) {
@@ -230,7 +232,19 @@ export default function createRenderBloom (regl, { type = 'uint8', hdr = false, 
 
     let norm = 0
     for (let i = 0; i < levels; i++) norm += Math.pow(scatter, i)
-    return { texture: low, norm: Math.max(norm, 1e-4) }
+    // halo: a coarser level of the upsample chain (up[haloLevel] holds the
+    // levels haloLevel..levels-1), for wide effects such as the halation;
+    // haloNorm is its own weight sum. bright: the first, prefiltered (soft
+    // thresholded) half-res level, linear, for the anamorphic flares.
+    let haloNorm = 0
+    for (let i = 0; i < levels - haloLevel; i++) haloNorm += Math.pow(scatter, i)
+    return {
+      texture: low,
+      norm: Math.max(norm, 1e-4),
+      halo: up[haloLevel] || low,
+      haloNorm: Math.max(haloNorm, 1e-4),
+      bright: down[0]
+    }
   }
 
   function destroy () {
