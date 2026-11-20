@@ -274,9 +274,27 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     return out
   }
 
+  // Framing of the fabric's 3D shape (render-grid shapeFraming, set every
+  // frame by index.js from the eased shape weights, so it moves as slowly
+  // as the morph): the look-at point rises / sinks to the shape's centre,
+  // the eye follows it plus `eyeRise`, and the path is scaled by `radius`
+  // around the centre (further out for a ball, closer and higher above a
+  // well). Identity when flat. Only the roaming path: the user's camera is
+  // left alone.
+  const frame = { targetZ: 0, eyeRise: 0, radius: 1 }
+  function setFrame (targetZ, eyeRise, radius) {
+    const fin = (x, d) => (typeof x === 'number' && isFinite(x) ? x : d)
+    frame.targetZ = Math.min(Math.max(fin(targetZ, 0), -2), 2)
+    frame.eyeRise = Math.min(Math.max(fin(eyeRise, 0), -1), 3)
+    frame.radius = Math.min(Math.max(fin(radius, 1), 0.3), 3)
+  }
+
   const tmpDrift = new Float64Array(3)
   function pathEye (out, rads, t) {
     ellipse(out, rads) // also leaves the blended shot params in `params`
+    out[0] *= frame.radius
+    out[1] *= frame.radius
+    out[2] = out[2] * frame.radius + frame.targetZ + frame.eyeRise
     drift(tmpDrift, t, settings.drift * params.drift)
     out[0] += tmpDrift[0]
     out[1] += tmpDrift[1]
@@ -287,8 +305,8 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
   // angle the eye was computed at (the eye sits at ~(sin r, cos r))
   function pathTarget (out, t, r) {
     targetDrift(out, t, settings.drift)
-    out[2] += params.tz
-    const la = params.lookAhead * Math.max(0, settings.lookAhead)
+    out[2] += params.tz + frame.targetZ
+    const la = params.lookAhead * Math.max(0, settings.lookAhead) * frame.radius
     out[0] -= Math.sin(r) * la
     out[1] -= Math.cos(r) * la
     return out
@@ -528,6 +546,7 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     getCenter,
     getState,
     setShot,
+    setFrame,
     cut,
     getShot: () => shot,
     hasVariation: () => !isIdentity(curVar),

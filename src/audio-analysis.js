@@ -6,6 +6,9 @@
 //   bass / mid / treble / energy   smoothed aggregates, 0..1
 //   kick      0..1 envelope: jumps to 1 on a low-end onset, then decays
 //   onKick    true only on the frame an onset is detected
+//   snare / onSnare   same for snares / claps (broadband mid flux plus a
+//             noisy 2-6 kHz component), kept apart from the kick
+//   hat / onHat       same for hi-hats (treble flux above ~6 kHz)
 //   bandsL / bandsR   the same bands for each channel (own AGC); `bands`
 //             is the mono mix (average of both channels). With a mono
 //             source all three are identical.
@@ -38,7 +41,32 @@ const DEFAULTS = {
   kickSensitivity: 1.6, // flux must exceed mean + sensitivity * stddev
   kickMinFlux: 0.015, // absolute floor on the flux (per band, per frame)
   kickRefractory: 0.25, // seconds between two onsets
-  kickDecay: 0.3 // seconds for the envelope to (nearly) vanish
+  kickDecay: 0.3, // seconds for the envelope to (nearly) vanish
+
+  // snare / clap detection: positive flux of the body (mid band) blended
+  // with the noise burst (2-6 kHz) that tells a snare from a tom or a bass
+  // note. Band layout fixed at creation, like the kick's.
+  snareLowFreq: 150,
+  snareHighFreq: 2500,
+  snareNoiseLowFreq: 2000,
+  snareNoiseHighFreq: 6000,
+  snareNoiseWeight: 0.5, // 0 = body only, 1 = noise only
+  snareSensitivity: 1.8,
+  snareMinFlux: 0.012,
+  snareRefractory: 0.12,
+  snareDecay: 0.35,
+  // a kick also splashes into the mids: a snare candidate this soon after a
+  // kick must beat its threshold by snareKickMargin AND show its own noise
+  // burst, so a plain kick never fires the snare too
+  snareKickWindow: 0.07, // s
+  snareKickMargin: 1.6,
+
+  // hi-hat detection: flux above hatLowFreq (to maxFreq)
+  hatLowFreq: 6000,
+  hatSensitivity: 1.5,
+  hatMinFlux: 0.01,
+  hatRefractory: 0.06, // 16ths at 175 bpm are ~86 ms apart
+  hatDecay: 0.12
 }
 
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x)
@@ -82,6 +110,16 @@ export default function createAnalysis (audio, opts = {}) {
   const midRange = bandRange(250, 2000)
   const trebleRange = bandRange(2000, Infinity)
   const kickRange = bandRange(opts.kickLowFreq, opts.kickHighFreq)
+  // the percussion ranges may not exist at all (low sample rate, maxFreq
+  // under the hat range): null disables that detector instead of falling
+  // back to the first band like bandRange does
+  const optRange = (fLo, fHi) => {
+    const r = bandRange(fLo, fHi)
+    return r[0] === 0 && r[1] === 1 && !(bandFreq[0] >= fLo && bandFreq[0] < fHi) ? null : r
+  }
+  const snareBodyRange = optRange(opts.snareLowFreq, opts.snareHighFreq)
+  const snareNoiseRange = optRange(opts.snareNoiseLowFreq, opts.snareNoiseHighFreq)
+  const hatRange = optRange(opts.hatLowFreq, Infinity)
 
   // --- state --------------------------------------------------------------
   const raw = new Float32Array(bandCount) // 0..~1.3, from dB (mono)
@@ -103,6 +141,13 @@ export default function createAnalysis (audio, opts = {}) {
   let fluxMean = 0
   let fluxVar = 0
   let sinceKick = Infinity
+  // adaptive threshold state of the other onset detectors: exponential
+  // moving mean / variance of their flux over ~1 s, time since the last
+  // onset
+  const createOnsetState = () => ({ mean: 0, variance: 0, since: Infinity })
+  const snareState = createOnsetState()
+  const snareNoiseState = createOnsetState() // the noise part alone
+  const hatState = createOnsetState()
 
   const features = {
     bands,
@@ -115,7 +160,11 @@ export default function createAnalysis (audio, opts = {}) {
     treble: 0,
     energy: 0,
     kick: 0,
-    onKick: false
+    onKick: false,
+    snare: 0,
+    onSnare: false,
+    hat: 0,
+    onHat: false
   }
 
   const smooth = (prev, target, dt) => {
@@ -128,6 +177,38 @@ export default function createAnalysis (audio, opts = {}) {
     for (let i = a; i < b; i++) s += arr[i]
     return s / (b - a)
   }
+
+  // mean positive spectral flux (raw levels) over a band range
+  function rangeFlux (r) {
+    if (!r) return 0
+    let f = 0
+    for (let i = r[0]; i < r[1]; i++) {
+      const d = raw[i] - prevRaw[i]
+      if (d > 0) f += d
+    }
+    return f / (r[1] - r[0])
+  }
+
+  // updates the moving stats of `state` with this frame's flux; returns how
+  // far the flux is above mean + sensitivity * std (in flux units, <= 0 =
+  // no onset), computed BEFORE the stats absorb this frame (as the kick)
+  function onsetExcess (state, flux, sensitivity, dt) {
+    const std = Math.sqrt(Math.max(state.variance, 0))
+    const excess = flux - (state.mean + sensitivity * std)
+    const a = 1 - Math.exp(-dt / 1.0)
+    const diff = flux - state.mean
+    state.mean += a * diff
+    state.variance = (1 - a) * (state.variance + a * diff * diff)
+    // a NaN would latch the detector off for good
+    if (!(state.mean === state.mean) || !(state.variance === state.variance)) {
+      state.mean = 0
+      state.variance = 0
+    }
+    return excess === excess ? excess : -1
+  }
+
+  // exp decay reaching ~5% after `decay` seconds
+  const decayEnv = (env, decay, dt) => env * Math.exp((-3 * dt) / Math.max(decay, 0.01))
 
   // spectrum (dB) -> raw band levels in `out`; returns their mean
   function readRaw (db, out) {
@@ -251,6 +332,54 @@ export default function createAnalysis (audio, opts = {}) {
     } else {
       // exp decay reaching ~5% after kickDecay seconds
       features.kick *= Math.exp((-3 * dt) / Math.max(opts.kickDecay, 0.01))
+    }
+
+    // snare / clap: body + noise flux. Its threshold is mean + k * std of
+    // the blend, so steady mids (pads, vocals) do not trigger it; the
+    // noise part must also be rising on its own within the kick window
+    const noiseW = clamp01(opts.snareNoiseWeight)
+    const bodyFlux = rangeFlux(snareBodyRange)
+    const noiseFlux = rangeFlux(snareNoiseRange)
+    const snareFlux = bodyFlux * (1 - noiseW) + noiseFlux * noiseW
+    snareState.since += dt
+    const snareStd = Math.sqrt(Math.max(snareState.variance, 0))
+    const snareThreshold = snareState.mean + opts.snareSensitivity * snareStd
+    const snareExcess = onsetExcess(snareState, snareFlux, opts.snareSensitivity, dt)
+    const noiseExcess = onsetExcess(snareNoiseState, noiseFlux, 1, dt)
+    const nearKick = sinceKick < opts.snareKickWindow
+    const isSnare =
+      !!snareBodyRange &&
+      gate > 0.5 &&
+      snareState.since >= opts.snareRefractory &&
+      snareFlux > opts.snareMinFlux &&
+      snareExcess > 0 &&
+      (!nearKick ||
+        (noiseExcess > 0 && snareFlux > snareThreshold * Math.max(1, opts.snareKickMargin)))
+    features.onSnare = isSnare
+    if (isSnare) {
+      snareState.since = 0
+      features.snare = 1
+    } else {
+      features.snare = decayEnv(features.snare, opts.snareDecay, dt)
+    }
+
+    // hi-hats: treble flux only (kicks and snares barely reach > 6 kHz,
+    // and an open hat or a cymbal is still one rising edge)
+    const hatFlux = rangeFlux(hatRange)
+    hatState.since += dt
+    const hatExcess = onsetExcess(hatState, hatFlux, opts.hatSensitivity, dt)
+    const isHat =
+      !!hatRange &&
+      gate > 0.5 &&
+      hatState.since >= opts.hatRefractory &&
+      hatFlux > opts.hatMinFlux &&
+      hatExcess > 0
+    features.onHat = isHat
+    if (isHat) {
+      hatState.since = 0
+      features.hat = 1
+    } else {
+      features.hat = decayEnv(features.hat, opts.hatDecay, dt)
     }
 
     // sections and tempo, from the raw (pre-AGC) levels: the AGC would
