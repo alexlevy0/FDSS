@@ -8,7 +8,7 @@
 // ALIASED_POINT_SIZE_RANGE; points that would be smaller than ~1.5 px keep
 // that size and fade instead (no sub-pixel flicker under the TAA jitter).
 // Brightness follows the treble, and a random subset of the particles
-// sparkles on every beat.
+// sparkles on every beat, and a smaller one twinkles on every hi-hat.
 import { paletteGLSL } from './palette'
 
 export default function createRenderParticles (regl, { count = 1500, seed = 1 } = {}) {
@@ -57,6 +57,9 @@ export default function createRenderParticles (regl, { count = 1500, seed = 1 } 
       uniform float sparkle; // 0..1 envelope, jumps on beats
       uniform float sparkleKey; // changes every beat
       uniform float sparkleShare; // fraction of particles that sparkle
+      uniform float hat; // 0..1 envelope x amount, jumps on hi-hats
+      uniform float hatKey; // changes every hat
+      uniform float hatShare;
       uniform float pixelScale;
       ${paletteGLSL}
       varying vec4 color;
@@ -102,6 +105,10 @@ export default function createRenderParticles (regl, { count = 1500, seed = 1 } 
         // a different random subset sparkles on each beat
         float pick = fract(seedB.w * 7.13 + sparkleKey * 0.618034);
         float sp = sparkle * step(1.0 - sparkleShare, pick);
+        // hi-hats: a brief twinkle of another, smaller subset (a different
+        // hash than the beat's, so the two do not always pick the same dust)
+        float hpick = fract(seedA.w * 13.17 + seedB.y * 3.7 + hatKey * 0.754877);
+        sp += hat * step(1.0 - hatShare, hpick);
 
         vec3 rgb = palette(0.45 + 0.5 * seedB.z);
         float a = brightness * tw * (1.0 + 4.0 * sp) * ends * near * fade;
@@ -134,6 +141,9 @@ export default function createRenderParticles (regl, { count = 1500, seed = 1 } 
       sparkle: regl.prop('sparkle'),
       sparkleKey: regl.prop('sparkleKey'),
       sparkleShare: regl.prop('sparkleShare'),
+      hat: regl.prop('hat'),
+      hatKey: regl.prop('hatKey'),
+      hatShare: regl.prop('hatShare'),
       pixelScale: regl.prop('pixelScale'),
       paletteA: regl.prop('paletteA'),
       paletteB: regl.prop('paletteB'),
@@ -156,6 +166,8 @@ export default function createRenderParticles (regl, { count = 1500, seed = 1 } 
   let time = 0
   let sparkle = 0
   let sparkleKey = 0
+  let hat = 0
+  let hatKey = 0
   const props = {
     time: 0,
     volumeMin: [-1.8, -1.8, -0.1],
@@ -165,6 +177,9 @@ export default function createRenderParticles (regl, { count = 1500, seed = 1 } 
     sparkle: 0,
     sparkleKey: 0,
     sparkleShare: 0.15,
+    hat: 0,
+    hatKey: 0,
+    hatShare: 0.08,
     pixelScale: 1,
     count: n,
     paletteA: null,
@@ -177,7 +192,8 @@ export default function createRenderParticles (regl, { count = 1500, seed = 1 } 
   // opts: dt, features, palette (uniforms), amount (brightness 0..),
   // trebleGain, sparkle (amount), sparkleShare, size (px), speed,
   // pixelScale, intro (0..1), share (0..1 of the particles drawn),
-  // beatConfidence (bpm confidence needed for the beat sparkles, 0.3)
+  // beatConfidence (bpm confidence needed for the beat sparkles, 0.3),
+  // hat (twinkle amount on hi-hats, 0 = off), hatShare, hatDecay (s)
   function render (o) {
     const dt = Math.min(Math.max(o.dt || 0, 0), 0.25)
     time += dt * Math.max(0, o.speed === undefined ? 1 : o.speed)
@@ -192,6 +208,13 @@ export default function createRenderParticles (regl, { count = 1500, seed = 1 } 
     } else {
       sparkle *= Math.exp(-dt / 0.18)
     }
+    // hi-hats: own short envelope (the analysis' is tuned for the grid)
+    if (f && f.onHat) {
+      hat = 1
+      hatKey = (hatKey + 1) % 1000
+    } else {
+      hat *= Math.exp((-3 * dt) / Math.max(o.hatDecay || 0.15, 0.01))
+    }
     const treble = f ? f.treble : 0
     const brightness =
       Math.max(0, o.amount) * (0.35 + (o.trebleGain || 0) * treble) * (o.intro === undefined ? 1 : o.intro)
@@ -203,6 +226,9 @@ export default function createRenderParticles (regl, { count = 1500, seed = 1 } 
     props.brightness = brightness
     props.sparkle = sparkle * Math.max(0, o.sparkle || 0)
     props.sparkleKey = sparkleKey
+    props.hat = hat * Math.min(Math.max(o.hat || 0, 0), 4)
+    props.hatKey = hatKey
+    props.hatShare = Math.min(Math.max(o.hatShare === undefined ? 0.08 : o.hatShare, 0), 1)
     props.sparkleShare = Math.min(Math.max(o.sparkleShare || 0, 0), 1)
     props.pixelScale = Math.max(0.25, o.pixelScale || 1)
     props.count = drawCount

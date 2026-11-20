@@ -11,15 +11,18 @@ import createCamera, { CAMERA_SHOTS } from './camera'
 import createTitleCard from './title-card'
 import createAudioControls, { isTextField, prefersReducedMotion } from './audio-controls'
 import createRenderBloom from './render-bloom'
-import createRenderPost from './render-post'
+import createRenderPost, { AGX_LOOKS } from './render-post'
+import createRenderLut from './render-lut'
 import detectHdr, { HDR_EXTENSIONS } from './gpu-hdr'
 import createRenderBlur from './render-blur'
-import createRenderGrid, { GRID_FORMS } from './render-grid'
+import createRenderGrid, { GRID_FORMS, GRID_SHAPES, shapeWeights, shapeFraming, shapePoint } from './render-grid'
+import createRenderWaves from './render-waves'
 import createRenderTaa from './render-taa'
 import createRenderReflection from './render-reflection'
 import createRenderParticles from './render-particles'
 import createRenderDof from './render-dof'
 import createRenderGodrays, { GODRAYS_MAX_SAMPLES } from './render-godrays'
+import createRenderFog, { FOG_NOISE_PERIOD } from './render-fog'
 import createRenderHistory from './render-history'
 import createRenderSparks from './render-sparks'
 import createRenderFlares, { FLARES_MAX_PASSES } from './render-flares'
@@ -123,6 +126,22 @@ const sceneFbo = regl.framebuffer({
 const renderToScene = regl({ framebuffer: sceneFbo })
 const renderBloom = createRenderBloom(regl, hdrInfo)
 const renderPost = createRenderPost(regl, hdrInfo)
+// per-section 3D colour LUTs (procedural), blended on the CPU into one strip
+// sampled after tone mapping. 32^3 (1024 x 32) on desktop; 16^3 on touch
+// devices (16x less to rebuild during section transitions) and wherever the
+// fragment shader has no highp (a 1024-wide coordinate in mediump would be
+// off by half a texel)
+function fragmentHighp () {
+  const gl = regl._gl
+  if (!gl || !gl.getShaderPrecisionFormat) return true
+  try {
+    const f = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT)
+    return !!f && f.precision > 0
+  } catch (e) {
+    return false
+  }
+}
+const renderLut = createRenderLut(regl, { size: coarsePointer || !fragmentHighp() ? 16 : 32 })
 // temporal AA of the composed scene (history buffers of the scene's type)
 const renderTaa = createRenderTaa(regl, hdrInfo)
 // depth: mirror floor, dust, depth of field, god rays
@@ -130,10 +149,16 @@ const renderReflection = createRenderReflection(regl, hdrInfo)
 const renderParticles = createRenderParticles(regl, { count: coarsePointer ? 500 : 1500 })
 const renderDof = createRenderDof(regl, Object.assign({ taps: coarsePointer ? 10 : 16 }, hdrInfo))
 const renderGodrays = createRenderGodrays(regl, hdrInfo)
+// volumetric ground fog on the scene, before the bloom (render-fog)
+const renderFog = createRenderFog(regl, hdrInfo)
 // cinematic layers: anamorphic streaks (quarter height; half width on
 // desktop, quarter on touch) and a procedural lens dirt texture
 const renderFlares = createRenderFlares(regl, Object.assign({ widthShift: coarsePointer ? 2 : 1 }, hdrInfo))
 const lensDirt = createLensDirt(regl, { size: coarsePointer ? 256 : 512 })
+// propagating waves on the fabric: a GPU wave equation in a small square
+// texture (128 on touch devices), in the scene's HDR type when it has one
+const WAVE_SIZE = coarsePointer ? 128 : 256
+const renderWaves = createRenderWaves(regl, Object.assign({ size: WAVE_SIZE }, hdrInfo))
 
 const tracks = [
   { title: '#3', artist: 'fievresdusamedisoir', path: 'audio/fievresdusamedisoir3.mp3' },
@@ -333,6 +358,17 @@ const settings = {
   formMorph: 5, // s, eased morph between two forms
   formHold: 75, // s on a form before a phrase may change it (0 = never)
   dotSize: 2.5, // device px, dots of the point-cloud form
+  // 3D shapes of the fabric (render-grid GRID_SHAPES): the plane bends into
+  // a well, a dome, a ball or a ring, chosen per section like the forms
+  // (SECTION_LOOK shapes3d; 'auto') and changed on the same schedule
+  // (formHold), with a slow eased morph; hard cuts in drops snap between
+  // shapes. Same on touch devices: vertex ALU only (no fetch); the lit
+  // shapes' finite-difference normals (two more shape evaluations per
+  // vertex) go with lightDetail at governor level 3, the shapes themselves
+  // at level 6
+  shape3d: 'auto',
+  shapes3dAmount: 0.75, // how far the fabric bends into the shape, 0 = always flat
+  shapeMorphTime: 8, // s of the eased morph (x 2.5 with prefers-reduced-motion)
   cameraShot: 'auto',
   shotHold: 45, // s on a shot before a phrase may change it (0 = never)
   // hard cuts on bars while a drop dominates (and the tempo is trusted):
@@ -411,10 +447,56 @@ const settings = {
   sparksWidth: 1.6, // device px at the depth of the grid centre
   sparksMinPeak: 0.15, // fabric value a peak needs to throw sparks
 
+  // percussion accents, distinct from the kick pulse (render-grid,
+  // render-particles); features.onSnare / onHat from the analysis
+  snareAmount: 0.5, // brightness of the front sweeping across the fabric, 0 = off
+  snareWaveWidth: 0.18, // half width of the front, in base-plane units (fabric = 2)
+  snareWaveTime: 0.45, // s for a front to cross the fabric
+  snareLift: 0.015, // world units the front lifts the peaks it crosses
+  hatAmount: 0.5, // ribbon glints on hi-hats, 0 = off
+  hatShare: 0.06, // fraction of the ribbon segments that glint
+  hatGlintDecay: 0.12, // s
+  hatDust: 0.6, // dust twinkle on hi-hats, 0 = off
+  hatDustShare: 0.08, // fraction of the dust that twinkles
+
+  // propagating waves on the fabric (render-waves): kicks drop a broad
+  // ring, snares a line wave running sideways, bass changes push gently at
+  // the centre; damped, absorbed at the borders, at rest in silence
+  waveAmount: 0.035, // world height of a full wave (grid peaks: 0.28), 0 = off
+  waveSpeed: 0.9, // base-plane units / s (the fabric is 2 wide)
+  waveDamping: 1.2, // 1 / s: amplitude halves in ~1.2 s
+  kickImpulse: 0.45, // wave height dropped by a kick (0..1)
+  // wave height of a snare line (0..1): a subtle relief only, the grid's
+  // snare front is the snare's main visual (the waves' light exaggerates
+  // slopes by waveRelief, 0.3 tilted the normal ~36 deg: a bright line)
+  snareImpulse: 0.1,
+  waveBass: 0.5, // continuous drive by bass changes, 0 = none
+
+  // lighting of the fabric (render-grid): normals from the height field
+  // (frequency relief + waves) modulate the emissive ribbons, measured
+  // against the flat fabric, so flat areas keep their look. Per section
+  // scale: SECTION_LOOK spec / rim
+  lightAmount: 0.8, // master (and shading of the slopes), 0 = off
+  specular: 0.35, // highlight of the orbiting key light
+  rimLight: 0.4, // fresnel rim on the crests, in the palette's accent
+  iridescence: 0.12, // thin-film hue shift with the view angle
+  waveRelief: 5, // how much more the waves tilt the normals than they move
+  lightOrbit: 0.05, // rad / s of the key light around the fabric (~2 min a turn)
+  lightElevation: 0.55, // rad above the fabric's plane
+
   fogAmount: 0.85, // 0 = no fog
   fogStart: -0.3, // fog range, in view-space depth relative to the grid centre
   fogEnd: 1.6,
   fogDim: 0.5, // how much fogged lines also darken (besides fading)
+  // volumetric height fog (render-fog), a post pass on the HDR scene: a
+  // dark palette haze lying on the floor, denser with distance and in the
+  // gaps, tinted toward the key light and the god-ray source, with slow
+  // drifting wisps; thicker in breakdowns / builds, clears on the drop
+  // (SECTION_LOOK fog). Named vol* because fogAmount above is the grid's
+  // own distance fade. Lighter on touch devices (also a coarser buffer)
+  volFogAmount: coarsePointer ? 0.15 : 0.22, // density at the floor, 0 = off
+  volFogHeight: 0.35, // scale height above the floor (world units)
+  volFogNoise: 0.55, // contrast of the drifting wisps, 0 = uniform haze
 
   motionBlur: true,
   motionBlurAmount: 0.45,
@@ -425,7 +507,16 @@ const settings = {
   bloomScatter: 0.75, // weight of each coarser mip: higher = wider glow
   bloomKick: 1.2, // bloom flash on kicks: intensity * (1 + bloomKick * kick)
 
-  exposure: 0.75, // linear gain before ACES tone mapping
+  exposure: 0.75, // linear gain before tone mapping (tuned with ACES)
+  // tone mapping: AgX (filmic, bright colours travel to white instead of
+  // skewing hue) or ACES (the curve the look was tuned with). AgX gets an
+  // automatic extra gain that matches ACES' brightness (render-post)
+  tonemapper: 'agx',
+  // 'fdss' (contrast matched to the ACES look) | 'base' | 'punchy' |
+  // 'golden' (Blender's looks)
+  agxLook: 'fdss',
+  agxLookAmount: 1, // 0 = base AgX .. 1 = the full look
+  agxWhite: 1.08, // display-space white gain: brings the soft AgX shoulder up
   // anti-aliasing: temporal (jittered projection + history) on desktop,
   // FXAA on touch devices (one full-res pass less, no history buffers)
   aa: coarsePointer ? 'fxaa' : 'taa',
@@ -453,7 +544,10 @@ const settings = {
   flareThreshold: 0.35, // linear luminance feeding the streaks
   flarePasses: coarsePointer ? 3 : FLARES_MAX_PASSES, // blur passes (reach)
   lensDirt: 0.25, // dirt on the lens, lit by strong bloom only, 0 = off
-  grading: 1 // amount of the per-section colour grading, 0 = off
+  grading: 1, // amount of the per-section colour grading, 0 = off
+  // per-section 3D LUT looks (render-lut), display space after the grading;
+  // blended with the same section weights, 0 = off (no fetch)
+  lutAmount: 0.5
 }
 
 // ---- what each section does to the scene ----------------------------------
@@ -466,11 +560,19 @@ const settings = {
 //   shots   camera shot: 'classic' | 'wide' | 'top' | 'graze' | 'dive'
 //   cuts    shots the hard cuts pick from (settings.dropCuts; drop only),
 //           never the current one
+//   shapes3d 3D shape of the fabric: 'flat' | 'tunnel' | 'dome' | 'sphere' |
+//           'torus' (x settings.shapes3dAmount); in a drop, every hard cut
+//           also snaps to a shape drawn from this list
 //   temp    colour temperature of the grid, -1 cool .. +1 warm
 //   height  grid height factor
 //   bloom   bloom intensity factor
 //   history amount of the history landscape (x settings.historyAmount): the
 //           landscape of the past shows when the music thins out
+//   spec    specular factor of the fabric's lighting (x settings.specular)
+//   rim     rim light factor (x settings.rimLight): the bare crests of a
+//           breakdown catch more of it, a drop is lit by its own peaks
+//   fog     volumetric fog factor (x settings.volFogAmount): the haze
+//           gathers in breakdowns and builds and is blown away by the drop
 //   colour grading of the final image (render-post, x settings.grading),
 //   display-referred, after tone mapping; groove is the identity:
 //   lift    raises (+) or crushes (-) the blacks, -0.2..0.2
@@ -480,19 +582,19 @@ const settings = {
 //   warmth  grading temperature, -1 cool .. +1 warm (at equal luminance)
 const SECTION_LOOK = {
   breakdown: {
-    forms: ['points', 'circles'], shots: ['wide', 'top'], temp: -0.35, height: 0.7, bloom: 0.7, history: 1,
+    forms: ['points', 'circles'], shots: ['wide', 'top'], shapes3d: ['flat', 'flat', 'torus'], temp: -0.35, height: 0.7, bloom: 0.7, history: 1, spec: 0.8, rim: 1.6, fog: 1.1,
     lift: 0, gamma: 1.03, gain: 0.96, sat: 0.8, warmth: -0.4
   },
   build: {
-    forms: ['radial', 'circles'], shots: ['dive'], temp: 0.1, height: 1, bloom: 1, history: 0.35,
+    forms: ['radial', 'circles'], shots: ['dive'], shapes3d: ['tunnel', 'tunnel', 'dome'], temp: 0.1, height: 1, bloom: 1, history: 0.35, spec: 1.1, rim: 1, fog: 1.3,
     lift: -0.004, gamma: 0.95, gain: 1.02, sat: 1.06, warmth: 0.05
   },
   drop: {
-    forms: ['grid'], shots: ['graze'], cuts: ['graze', 'graze', 'classic', 'dive', 'wide', 'top'], temp: 0.3, height: 1.25, bloom: 1.3, history: 0.2,
+    forms: ['grid'], shots: ['graze'], cuts: ['graze', 'graze', 'classic', 'dive', 'wide', 'top'], shapes3d: ['flat', 'flat', 'dome', 'sphere', 'tunnel'], temp: 0.3, height: 1.25, bloom: 1.3, history: 0.2, spec: 1.3, rim: 0.8, fog: 0.35,
     lift: -0.01, gamma: 0.9, gain: 1.07, sat: 1.12, warmth: 0.35
   },
   groove: {
-    forms: ['grid', 'grid', 'grid', 'circles'], shots: ['classic', 'classic', 'wide', 'graze'], temp: 0, height: 1, bloom: 1, history: 0.3,
+    forms: ['grid', 'grid', 'grid', 'circles'], shots: ['classic', 'classic', 'wide', 'graze'], shapes3d: ['flat', 'flat', 'flat', 'dome', 'dome'], temp: 0, height: 1, bloom: 1, history: 0.3, spec: 1, rim: 1, fog: 1,
     lift: 0, gamma: 1, gain: 1, sat: 1, warmth: 0
   }
 }
@@ -519,6 +621,9 @@ function sectionMix (key) {
 const grade = { lift: 0, gamma: 1, gain: 1, saturation: 1, warmth: 0 } // reused
 const GRADE_KEYS = ['lift', 'gamma', 'gain', 'sat', 'warmth']
 const gradeMix = { lift: 0, gamma: 0, gain: 0, sat: 0, warmth: 0 }
+// the dead-zoned section weights (sum 1), shared with the section LUTs so
+// the grade and the LUT of a section always come and go together
+const lookWeights = { breakdown: 0, build: 0, drop: 0, groove: 1 }
 function updateGrade (gk) {
   const w = features.section
   let total = 0
@@ -529,6 +634,7 @@ function updateGrade (gk) {
   for (const name of SECTIONS) {
     if (name === 'groove') continue
     const x = smoothstep(0.35, 0.75, Math.max(0, w[name] || 0) * inv)
+    lookWeights[name] = x
     if (x <= 0) continue
     const look = SECTION_LOOK[name]
     for (const key of GRADE_KEYS) gradeMix[key] += x * look[key]
@@ -538,8 +644,10 @@ function updateGrade (gk) {
   if (rest < 0) {
     const k = 1 / (1 - rest)
     for (const key of GRADE_KEYS) gradeMix[key] *= k
+    for (const name of SECTIONS) if (name !== 'groove') lookWeights[name] *= k
     rest = 0
   }
+  lookWeights.groove = rest
   for (const key of GRADE_KEYS) gradeMix[key] += rest * SECTION_LOOK.groove[key]
   grade.lift = gradeMix.lift * gk
   grade.gamma = 1 + (gradeMix.gamma - 1) * gk
@@ -551,6 +659,7 @@ function updateGrade (gk) {
 // picks forms and shots from the table (or the locks in settings)
 const director = {
   formSince: 0,
+  shapeSince: 0,
   shotSince: 0,
   cutting: false, // hard-cut mode (a confident drop)
   cutBars: 0, // bars since the last cut
@@ -571,6 +680,9 @@ function pickCut (list, current, seed) {
   const r = ((seed >>> 0) % 1000003) / 1000003
   return pool[Math.min(pool.length - 1, Math.floor(r * pool.length))]
 }
+// s of a shape morph (reduced motion: 2.5x slower)
+const shapeMorphTime = () =>
+  Math.max(0.5, Number(settings.shapeMorphTime) || 0) * (prefersReducedMotion() ? 2.5 : 1)
 const pickFrom = (list, fallback) =>
   list && list.length ? list[Math.floor(Math.random() * list.length)] : fallback
 function direct (dt) {
@@ -578,6 +690,7 @@ function direct (dt) {
   // count as time spent on the current form / shot
   dt = Math.min(Math.max(dt || 0, 0), 0.1)
   director.formSince += dt
+  director.shapeSince += dt
   director.shotSince += dt
   director.sinceCut += dt
   director.cutNow = false
@@ -595,6 +708,20 @@ function direct (dt) {
   if (form && form !== renderGrid.getForm()) {
     renderGrid.setForm(form, settings.formMorph)
     director.formSince = 0
+  }
+
+  // 3D shape: same schedule as the forms, its own clock; a slow morph
+  // (slower still with reduced motion)
+  const morph = shapeMorphTime()
+  let shape = null
+  if (settings.shape3d !== 'auto') shape = settings.shape3d
+  else if (features.onSectionChange || due(director.shapeSince, settings.formHold)) {
+    shape = pickFrom(look.shapes3d, 'flat')
+    director.shapeSince = 0
+  }
+  if (shape && shape !== renderGrid.getShape()) {
+    renderGrid.setShape(shape, morph)
+    director.shapeSince = 0
   }
 
   // hard cuts: auto shots, a dominant drop, a trusted tempo, the camera
@@ -622,6 +749,16 @@ function direct (dt) {
           director.sinceCut = 0
           director.shotSince = 0
           director.cutNow = true
+          // the cut also snaps the fabric's shape (drawn from the drop's
+          // list with the cut's seed; it may stay): the jump is hidden by
+          // the cut itself. Reduced motion: an eased morph instead
+          if (settings.shape3d === 'auto' && settings.shapes3dAmount > 1e-3) {
+            const list = SECTION_LOOK.drop.shapes3d || ['flat']
+            const r = (((seed ^ 0x5bd1e995) >>> 0) % 1000003) / 1000003
+            const s = list[Math.min(list.length - 1, Math.floor(r * list.length))]
+            renderGrid.setShape(s, prefersReducedMotion() ? morph : 0)
+            director.shapeSince = 0
+          }
         }
       }
     }
@@ -687,6 +824,17 @@ audioGUI.add(analysis.opts, 'kickSensitivity', 0, 5).step(0.05)
 audioGUI.add(analysis.opts, 'kickMinFlux', 0, 0.1).step(0.001)
 audioGUI.add(analysis.opts, 'kickRefractory', 0.05, 1).step(0.01)
 audioGUI.add(analysis.opts, 'kickDecay', 0.05, 1).step(0.01)
+audioGUI.add(analysis.opts, 'snareSensitivity', 0, 5).step(0.05)
+audioGUI.add(analysis.opts, 'snareMinFlux', 0, 0.1).step(0.001)
+audioGUI.add(analysis.opts, 'snareNoiseWeight', 0, 1).step(0.01)
+audioGUI.add(analysis.opts, 'snareRefractory', 0.05, 1).step(0.01)
+audioGUI.add(analysis.opts, 'snareDecay', 0.05, 1).step(0.01)
+audioGUI.add(analysis.opts, 'snareKickWindow', 0, 0.2).step(0.005)
+audioGUI.add(analysis.opts, 'snareKickMargin', 1, 4).step(0.05)
+audioGUI.add(analysis.opts, 'hatSensitivity', 0, 5).step(0.05)
+audioGUI.add(analysis.opts, 'hatMinFlux', 0, 0.1).step(0.001)
+audioGUI.add(analysis.opts, 'hatRefractory', 0.02, 0.5).step(0.005)
+audioGUI.add(analysis.opts, 'hatDecay', 0.02, 0.5).step(0.01)
 audioGUI.close()
 // music structure: sections, tempo, and what they drive
 const structureStatus = { section: 'groove', tempo: '—' }
@@ -711,6 +859,9 @@ for (const name of ['breakdown', 'build', 'drop']) {
   drift.add(structureGUI.add(SECTION_LOOK[name], 'bloom', 0.1, 2.5).step(0.01).name(`${name} bloom`))
   drift.add(structureGUI.add(SECTION_LOOK[name], 'temp', -1, 1).step(0.01).name(`${name} colour temp`), { amount: 0.05, absolute: true })
   drift.add(structureGUI.add(SECTION_LOOK[name], 'history', 0, 1).step(0.01).name(`${name} history`))
+  drift.add(structureGUI.add(SECTION_LOOK[name], 'spec', 0, 3).step(0.01).name(`${name} specular`))
+  drift.add(structureGUI.add(SECTION_LOOK[name], 'rim', 0, 3).step(0.01).name(`${name} rim`))
+  drift.add(structureGUI.add(SECTION_LOOK[name], 'fog', 0, 3).step(0.01).name(`${name} fog`))
 }
 drift.add(structureGUI.add(SECTION_LOOK.groove, 'history', 0, 1).step(0.01).name('groove history'))
 structureGUI.close()
@@ -750,6 +901,9 @@ gridGUI.add(settings, 'gridForm', ['auto'].concat(GRID_FORMS)).name('form')
 gridGUI.add(settings, 'formMorph', 0, 20).step(0.5).name('form morph (s)')
 gridGUI.add(settings, 'formHold', 0, 300).step(5).name('form hold (s)')
 drift.add(gridGUI.add(settings, 'dotSize', 0.5, 8).step(0.1).name('dot size (px)'))
+gridGUI.add(settings, 'shape3d', ['auto'].concat(GRID_SHAPES)).name('3D shape')
+drift.add(gridGUI.add(settings, 'shapes3dAmount', 0, 1).step(0.01).name('3D shape amount'))
+gridGUI.add(settings, 'shapeMorphTime', 0.5, 30).step(0.5).name('3D morph (s)')
 const depthGUI = gui.addFolder('depth')
 drift.add(depthGUI.add(settings, 'reflectionAmount', 0, 1).step(0.01).name('reflection'))
 drift.add(depthGUI.add(settings, 'reflectionFade', 0, 12).step(0.1).name('reflection fade'))
@@ -807,11 +961,43 @@ drift.add(timeGUI.add(settings, 'sparksStreak', 0, 0.2).step(0.005).name('sparks
 drift.add(timeGUI.add(settings, 'sparksWidth', 0.5, 6).step(0.05).name('sparks width (px)'))
 timeGUI.add(settings, 'sparksMinPeak', 0, 1).step(0.01).name('sparks min peak')
 timeGUI.close()
+const percGUI = gui.addFolder('percussion')
+drift.add(percGUI.add(settings, 'snareAmount', 0, 2).step(0.01).name('snare front'))
+drift.add(percGUI.add(settings, 'snareWaveWidth', 0.03, 0.6).step(0.005).name('snare width'))
+percGUI.add(settings, 'snareWaveTime', 0.1, 1.5).step(0.01).name('snare sweep (s)')
+drift.add(percGUI.add(settings, 'snareLift', 0, 0.1).step(0.001).name('snare lift'))
+drift.add(percGUI.add(settings, 'hatAmount', 0, 2).step(0.01).name('hat glints'))
+percGUI.add(settings, 'hatShare', 0, 0.5).step(0.005).name('glint share')
+percGUI.add(settings, 'hatGlintDecay', 0.03, 0.5).step(0.01).name('glint decay (s)')
+drift.add(percGUI.add(settings, 'hatDust', 0, 3).step(0.01).name('hat dust'))
+percGUI.add(settings, 'hatDustShare', 0, 0.5).step(0.005).name('hat dust share')
+percGUI.close()
+const wavesGUI = gui.addFolder('waves')
+drift.add(wavesGUI.add(settings, 'waveAmount', 0, 0.2).step(0.001).name('wave height'))
+wavesGUI.add(settings, 'waveSpeed', 0.1, 3).step(0.05).name('wave speed')
+wavesGUI.add(settings, 'waveDamping', 0.1, 5).step(0.05).name('wave damping')
+drift.add(wavesGUI.add(settings, 'kickImpulse', 0, 1).step(0.01).name('kick impulse'))
+drift.add(wavesGUI.add(settings, 'snareImpulse', 0, 1).step(0.01).name('snare impulse'))
+drift.add(wavesGUI.add(settings, 'waveBass', 0, 2).step(0.01).name('bass drive'))
+wavesGUI.add({ mode: `${renderWaves.mode} ${WAVE_SIZE}²` }, 'mode').name('wave buffer').disable()
+wavesGUI.close()
+const lightGUI = gui.addFolder('light')
+drift.add(lightGUI.add(settings, 'lightAmount', 0, 2).step(0.01).name('light'))
+drift.add(lightGUI.add(settings, 'specular', 0, 2).step(0.01))
+drift.add(lightGUI.add(settings, 'rimLight', 0, 2).step(0.01).name('rim light'))
+drift.add(lightGUI.add(settings, 'iridescence', 0, 1).step(0.01))
+drift.add(lightGUI.add(settings, 'waveRelief', 0, 20).step(0.1).name('wave relief'))
+lightGUI.add(settings, 'lightOrbit', 0, 0.5).step(0.005).name('light orbit (rad/s)')
+lightGUI.add(settings, 'lightElevation', 0.05, 1.5).step(0.01).name('light elevation')
+lightGUI.close()
 const fogGUI = gui.addFolder('fog')
 drift.add(fogGUI.add(settings, 'fogAmount', 0, 1).step(0.01))
 drift.add(fogGUI.add(settings, 'fogStart', -3, 3).step(0.05))
 drift.add(fogGUI.add(settings, 'fogEnd', -3, 4).step(0.05))
 drift.add(fogGUI.add(settings, 'fogDim', 0, 1).step(0.01))
+drift.add(fogGUI.add(settings, 'volFogAmount', 0, 1.5).step(0.01).name('ground fog'))
+drift.add(fogGUI.add(settings, 'volFogHeight', 0.05, 1.5).step(0.01).name('fog height'))
+drift.add(fogGUI.add(settings, 'volFogNoise', 0, 1).step(0.01).name('fog wisps'))
 fogGUI.close()
 const paletteGUI = gui.addFolder('palette')
 paletteGUI.add(palette.settings, 'crossfade', 0, 10).step(0.1)
@@ -822,6 +1008,10 @@ drift.add(paletteGUI.add(palette.settings, 'energyShift', 0, 0.5).step(0.01))
 paletteGUI.close()
 const postGUI = gui.addFolder('post')
 drift.add(postGUI.add(settings, 'exposure', 0.1, 3).step(0.01))
+postGUI.add(settings, 'tonemapper', ['agx', 'aces']).name('tone mapping')
+postGUI.add(settings, 'agxLook', Object.keys(AGX_LOOKS)).name('agx look')
+drift.add(postGUI.add(settings, 'agxLookAmount', 0, 1).step(0.01).name('agx look amount'), { amount: 0.05, absolute: true })
+drift.add(postGUI.add(settings, 'agxWhite', 0.9, 1.2).step(0.005).name('agx white'), { amount: 0.01, absolute: true })
 postGUI.add(settings, 'aa', ['taa', 'fxaa', 'off']).name('anti-aliasing')
   .onChange(() => renderTaa.reset())
 postGUI.add(settings, 'taaHistory', 0, 0.98).step(0.01).name('taa history')
@@ -856,6 +1046,9 @@ cinemaGUI.add(settings, 'flareThreshold', 0, 2).step(0.01).name('flare threshold
 cinemaGUI.add(settings, 'flarePasses', 1, FLARES_MAX_PASSES).step(1).name('flare passes')
 drift.add(cinemaGUI.add(settings, 'lensDirt', 0, 3).step(0.01).name('lens dirt'))
 cinemaGUI.add(settings, 'grading', 0, 1).step(0.01).name('section grading')
+// not drifted: every move of the amount rebuilds and re-uploads the 32^3
+// LUT on the CPU (render-lut), and the section weights already vary it
+cinemaGUI.add(settings, 'lutAmount', 0, 1).step(0.01).name('section LUT')
 // per-section grading (SECTION_LOOK); not drifted: groove must stay the
 // identity, and the others are already small offsets
 const gradingGUI = cinemaGUI.addFolder('section grading')
@@ -1094,8 +1287,190 @@ function findPeaks (minValue) {
   return found
 }
 
+// Snare accents (the grid's front and the waves' line), rate limited: a
+// 16th-note snare roll or a clap pattern fires onSnare ~8 times a second,
+// and a full-strength sweep on each, alternating sides, strobes. Hits closer
+// than SNARE_MIN_GAP to the last accepted one are ignored, the rest are
+// weakened when they follow closely; the sweep only alternates sides when
+// hits are spaced, so a roll reads as one direction. One side for both
+// effects, so they read as one event.
+const SNARE_MIN_GAP = 0.25 // s
+const snareAccent = { fire: false, strength: 0, side: 1, last: -Infinity }
+function stepSnareAccent (time) {
+  snareAccent.fire = false
+  if (!features.onSnare || !Number.isFinite(time)) return
+  const gap = time - snareAccent.last
+  // a seek backwards (gap < 0) counts as spaced
+  if (gap >= 0 && gap < SNARE_MIN_GAP) return
+  const x = gap >= 0 ? Math.min(Math.max((gap - SNARE_MIN_GAP) / 0.35, 0), 1) : 1
+  snareAccent.strength = 0.5 + 0.5 * x * x * (3 - 2 * x)
+  if (!(gap >= 0 && gap < 0.35)) snareAccent.side = -snareAccent.side
+  snareAccent.last = time
+  snareAccent.fire = true
+}
+
 // smoothed amount of the history landscape (sections / lock)
 let historyLevel = 0
+
+// Waves, per frame: impulses from this frame's onsets, the bass drive, and
+// the quality tier (resolution / substeps: full up to level 1, 3/4 at 2-3,
+// 1/2 at 4-5, off at 6). Off with prefers-reduced-motion (the waves are
+// nothing but motion), when wave height is 0, or when the grid shader has
+// no texture unit left for the wave map.
+const waveState = { bassSlow: 0 }
+const GOLDEN_ANGLE = 2.39996323
+function updateWaves (dt, q, intro, reducedMotion) {
+  const enabled = renderGrid.wavesSupported && renderWaves.supported &&
+    settings.waveAmount > 1e-4 && !reducedMotion && q < 6
+  // bass drive: the change of the bass against its own ~0.6 s average, so
+  // a steady (or silent) bass pushes nothing and the fabric settles
+  const bass = Number.isFinite(features.bass) ? features.bass : 0
+  waveState.bassSlow += (bass - waveState.bassSlow) * (1 - Math.exp(-Math.min(Math.max(dt, 0), 0.1) / 0.6))
+  const drive = settings.waveBass * 4 * Math.min(Math.max(bass - waveState.bassSlow, -0.25), 0.25) * intro
+  if (enabled && intro > 0.3) {
+    if (features.onKick && settings.kickImpulse > 0) {
+      // the downbeat drops at the centre, the other beats on a ring
+      // (golden angle per beat: never twice the same spot in a row)
+      const beat = Math.floor(features.beat || 0)
+      let x = 0
+      let y = 0
+      if (beat % 4 !== 0) {
+        const a = beat * GOLDEN_ANGLE + (Number(settings.seed) || 0)
+        x = Math.cos(a) * 0.42
+        y = Math.sin(a) * 0.42
+      }
+      renderWaves.kick(x, y, settings.kickImpulse)
+    }
+    if (snareAccent.fire && settings.snareImpulse > 0) {
+      // a line along the view direction, off-centre on the side the grid's
+      // snare front starts from (shared side, see stepSnareAccent): its
+      // wave runs sideways, in the front's direction
+      const v = camera.getMatrix()
+      const rx = Number.isFinite(v[0]) ? v[0] : 1
+      const ry = Number.isFinite(v[4]) ? v[4] : 0
+      const len = Math.hypot(rx, ry) || 1
+      const s = -snareAccent.side
+      renderWaves.snare((rx / len) * 0.38 * s, (ry / len) * 0.38 * s, -ry / len, rx / len,
+        settings.snareImpulse * snareAccent.strength)
+    }
+  }
+  const full = WAVE_SIZE
+  return renderWaves.update({
+    enabled,
+    dt,
+    speed: settings.waveSpeed,
+    damping: settings.waveDamping,
+    drive,
+    size: q >= 4 ? full / 2 : q >= 2 ? Math.round(full * 0.75) : full,
+    maxSteps: q >= 4 ? 2 : q >= 2 ? 3 : 4,
+    force: warmingUp
+  })
+}
+
+// Key light of the fabric: a direction slowly orbiting around the vertical
+// at settings.lightElevation, so highlights wander over the relief instead
+// of sitting in one spot for a whole mix. Frozen with prefers-reduced-motion
+// (the light stays where it is). The phase starts from the seed.
+const light = { phase: null, dir: [0, 0, 1] }
+function updateLight (dt, reducedMotion) {
+  if (light.phase === null) light.phase = (Number(settings.seed) || 0) * 1.7 + 0.8
+  if (!reducedMotion) light.phase += Math.min(Math.max(dt || 0, 0), 0.1) * (settings.lightOrbit || 0)
+  if (!Number.isFinite(light.phase)) light.phase = 0
+  light.phase %= Math.PI * 2
+  const el = Math.min(Math.max(Number(settings.lightElevation) || 0, 0.02), 1.55)
+  light.dir[0] = Math.cos(light.phase) * Math.cos(el)
+  light.dir[1] = Math.sin(light.phase) * Math.cos(el)
+  light.dir[2] = Math.sin(el)
+  return light.dir
+}
+
+// Volumetric ground fog (render-fog), per frame: the eased level (amount x
+// the section's fog column, 0 from governor level 4), the slow drift of
+// the wisps and the haze colours from the palette. The level clears fast
+// (0.7 s, the drop blows it away) and gathers slowly (3 s), and the
+// governor or the slider never pop it. Reduced motion: the wisps hold
+// still (no drift, no evolution).
+const fogLook = {
+  level: 0,
+  offset: [0, 0, 0], // noise drift (xy) and evolution (z), in noise cells
+  wind: 0, // direction of the slowly turning wind (rad)
+  base: [0, 0, 0], // linear, dark
+  light: [0, 0, 0], // linear, toward the key light / ray source
+  tmp: [0, 0, 0]
+}
+const FOG_NOISE_SCALE = 1.6 // noise cells per world unit (~3 wisps across the fabric)
+// linearised palette colour at t, pulled 30% toward grey (the haze is a
+// tint, never a saturated colour) and scaled to the luminance lum
+function fogColor (out, t, lum) {
+  const c = palette.evaluate(t, fogLook.tmp)
+  for (let i = 0; i < 3; i++) c[i] = Math.pow(Math.max(c[i], 1e-4), 2.2)
+  const l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+  const k = lum / Math.max(l, 1e-4)
+  for (let i = 0; i < 3; i++) out[i] = Math.min(1, (c[i] * 0.7 + l * 0.3) * k)
+  return out
+}
+function updateFog (dt, q, reducedMotion) {
+  dt = Math.min(Math.max(dt || 0, 0), 0.1)
+  const target = q >= 4 ? 0 : Math.max(0, Number(settings.volFogAmount) || 0) * sectionMix('fog')
+  const tau = target < fogLook.level ? 0.7 : 3
+  fogLook.level += (target - fogLook.level) * (1 - Math.exp(-dt / tau))
+  if (!Number.isFinite(fogLook.level)) fogLook.level = 0
+  if (!reducedMotion) {
+    fogLook.wind = (fogLook.wind + dt * 0.013) % (Math.PI * 2)
+    const speed = 0.05 * FOG_NOISE_SCALE // 0.05 world units / s
+    fogLook.offset[0] += Math.cos(fogLook.wind) * speed * dt
+    fogLook.offset[1] += Math.sin(fogLook.wind) * speed * dt
+    fogLook.offset[2] += 0.06 * dt
+    // the noise is periodic: wrapping keeps it seamless and small (mediump;
+    // render-fog wraps the eye's part with it)
+    for (let i = 0; i < 3; i++) {
+      fogLook.offset[i] %= FOG_NOISE_PERIOD
+      if (!Number.isFinite(fogLook.offset[i])) fogLook.offset[i] = 0
+    }
+  }
+  fogColor(fogLook.base, 0.15, 0.012)
+  fogColor(fogLook.light, 0.85, 0.045)
+  return fogLook.level
+}
+
+// 3D shape of the fabric, per frame, after the director picked it: steps
+// the eased morph, eases the amount (the slider, its drift, and the
+// governor's last level, which flattens the fabric slowly instead of
+// popping), then derives the effective weights, the dome's breathing, the
+// torus spin and the camera framing. Reduced motion: no breathing, no spin.
+const shapeLook = {
+  amount: 0, // eased settings.shapes3dAmount
+  weights: [0, 0, 0, 0], // effective tunnel, dome, sphere, torus
+  params: [0.55, 0], // dome curvature (rad / unit), torus spin (rad)
+  breath: 0, // phase of the dome's breathing
+  frame: [0, 0, 1], // look-at z, eye rise, path radius
+  center: [0, 0, 0], // the shape's centre (fog, DoF focus, TAA plane)
+  total: 0, // sum of the effective weights (0 = flat)
+  point: [0, 0, 0] // reused by shapePoint
+}
+const DOME_CURVE = 0.55
+function updateShapes (dt, q, reducedMotion) {
+  dt = Math.min(Math.max(dt || 0, 0), 0.1)
+  renderGrid.stepShape(dt)
+  const target = q >= 6 ? 0 : Math.min(Math.max(Number(settings.shapes3dAmount) || 0, 0), 1)
+  // amount changes as slowly as a morph (a third of it as time constant)
+  const tau = Math.max(0.5, shapeMorphTime() / 3)
+  shapeLook.amount += (target - shapeLook.amount) * (1 - Math.exp(-dt / tau))
+  if (!Number.isFinite(shapeLook.amount)) shapeLook.amount = 0
+  if (shapeLook.amount < 1e-4 && target === 0) shapeLook.amount = 0
+  const w = shapeWeights(shapeLook.weights, shapeLook.amount)
+  shapeLook.total = w[0] + w[1] + w[2] + w[3]
+  if (!reducedMotion) {
+    // the dome breathes (+-10 % of its curvature, ~12 s a breath) and the
+    // ring turns (~100 s a turn); both only show on their shape
+    shapeLook.breath = (shapeLook.breath + dt * (Math.PI * 2 / 12)) % (Math.PI * 2)
+    shapeLook.params[1] = (shapeLook.params[1] + dt * 0.06) % (Math.PI * 2)
+  }
+  shapeLook.params[0] = DOME_CURVE * (1 + 0.1 * Math.sin(shapeLook.breath))
+  shapeFraming(shapeLook.frame, w)
+  shapeLook.center[2] = shapeLook.frame[0]
+  camera.setFrame(shapeLook.frame[0], shapeLook.frame[1], shapeLook.frame[2])
+}
 
 // projection and view are computed once per frame in renderFrame (the TAA
 // pass needs the unjittered ones, the scene gets the jittered projection)
@@ -1203,6 +1578,8 @@ function startLoop () {
 // true during the warm-up frame: passes that are normally skipped while
 // invisible draw once anyway (fully transparent), so their shaders compile now
 let warmingUp = false
+// eased amount of the section LUTs (settings.lutAmount, 0 at governor level 6)
+let lutLevel = settings.lutAmount
 function warmUp () {
   warmingUp = true
   try {
@@ -1217,7 +1594,11 @@ function warmUp () {
 // Frame-time governor: an EMA of the frame time; when it stays above the
 // budget, one more heavy pass is dropped (depth of field, reflection and
 // half the history rows + fewer flare passes, god ray samples + no history
-// + half the sparks + no flares, TAA -> FXAA, pixel ratio 1.5, then 1); when it stays well
+// + half the sparks + no flares + fabric light from the wave slopes only,
+// TAA -> FXAA + no ground fog (quarter-res, one noise octave from level
+// 2), pixel ratio 1.5 + no fabric light, then 1 + no waves + the
+// fabric eases back to flat from its 3D shape + the section LUTs ease
+// out); when it stays well
 // under, quality comes back one step at a time, more slowly (hysteresis),
 // and even more slowly after a step up that had to be undone. Caveat: a
 // browser that caps rAF to 30 fps (e.g. Safari in Low Power Mode) looks
@@ -1282,11 +1663,22 @@ function renderFrame (time, dt) {
   const sectionBloom = sectionMix('bloom')
   const sectionTemp = sectionMix('temp')
   direct(dt)
+  updateShapes(dt, q, prefersReducedMotion())
   camera.tick({ time })
   // a hard cut this frame: no temporal state may carry the previous shot
   // over (TAA history, motion-blur trails, the history landscape's lag)
   const cutNow = director.cutNow
   if (cutNow) renderTaa.reset()
+  // percussion accents: a snare sends a front sideways across the screen
+  // (the camera's right vector on the base plane, so it reads as lateral
+  // from any shot), a hat a new set of glints. Reduced motion: a softer
+  // flash and no lift (see percussionScale)
+  stepSnareAccent(time)
+  if (snareAccent.fire && settings.snareAmount > 1e-3 && intro > 0.3) {
+    const v = camera.getMatrix()
+    renderGrid.snare(snareAccent.strength, v[0], v[4], snareAccent.side)
+  }
+  if (features.onHat && settings.hatAmount > 1e-3) renderGrid.hat()
   update()
   renderToFBO(() => {
     renderFrequencies()
@@ -1322,7 +1714,8 @@ function renderFrame (time, dt) {
     renderTaa.reset() // history is stale when TAA comes back on
   }
 
-  updateFrameCenter(frameProjection, frameView, 0)
+  // the shape's centre: focus of the depth of field, source of the rays
+  updateFrameCenter(frameProjection, frameView, shapeLook.center[2])
 
   // history landscape: records every frame (even when hidden), drawn with
   // the section amount; the governor halves it, then drops it (before
@@ -1341,6 +1734,9 @@ function renderFrame (time, dt) {
   historyLevel += (historyTarget - historyLevel) * (1 - Math.exp(-Math.min(Math.max(dt, 0), 0.1) / 1.5))
   if (!(historyLevel === historyLevel)) historyLevel = 0
   const historyAmount = q >= 3 ? 0 : historyLevel * intro
+  // flashes are toned down (not removed) for prefers-reduced-motion
+  const reducedMotion = prefersReducedMotion()
+  const wavesLive = updateWaves(dt, q, intro, reducedMotion)
 
   const gridProps = {
     frequencyVals: freqMapFBO,
@@ -1366,7 +1762,29 @@ function renderFrame (time, dt) {
     heightRef: settings.gridMaxHeight * Math.max(0.05, settings.heightColorRange),
     heightTint: settings.heightTint,
     sectionTemp,
-    dotSize: settings.dotSize
+    dotSize: settings.dotSize,
+    snareAmount: settings.snareAmount * (reducedMotion ? 0.35 : 1),
+    snareWidth: settings.snareWaveWidth,
+    snareLift: reducedMotion ? 0 : settings.snareLift,
+    hatAmount: settings.hatAmount * (reducedMotion ? 0.5 : 1),
+    hatShare: settings.hatShare,
+    // propagating waves: the wave map and its world height (0 = skipped)
+    waveMap: renderWaves.texture,
+    waveAmount: wavesLive ? settings.waveAmount : 0,
+    // lighting: per vertex (2 extra freq-map fetches for the relief); the
+    // governor keeps only the wave slopes from level 3 (no extra fetch)
+    // and switches it off from level 5
+    lightAmount: q >= 5 ? 0 : settings.lightAmount,
+    lightDetail: q < 3,
+    lightDir: updateLight(dt, reducedMotion),
+    specAmount: settings.specular * sectionMix('spec'),
+    rimAmount: settings.rimLight * sectionMix('rim'),
+    iridAmount: settings.iridescence,
+    waveRelief: settings.waveRelief,
+    // 3D shape (all zero weights: flat, the shader skips it)
+    shapeWeights: shapeLook.weights,
+    shapeParams: shapeLook.params,
+    shapeCenter: shapeLook.center
   }
 
   // peak sparks: on kicks, from the highest points of the fabric (more on
@@ -1379,7 +1797,10 @@ function renderFrame (time, dt) {
       peakSources.length = 0
       for (let i = 0; i < found; i++) {
         const pk = peakList[i]
-        peakSources.push([pk[0], pk[1], Math.min(1, pk[2] * 1.2) * 0.85 * gridProps.gridMaxHeight * intro])
+        const h = Math.min(1, pk[2] * 1.2) * 0.85 * gridProps.gridMaxHeight * intro
+        // from the bent fabric when it has a 3D shape
+        const sp = shapePoint(shapeLook.point, pk[0], pk[1], h, shapeLook.weights, shapeLook.params)
+        peakSources.push([sp[0], sp[1], sp[2]])
       }
       const drop = section.drop || 0
       const n = settings.sparksPerKick * (1 + settings.sparksDrop * drop) * (q >= 3 ? 0.5 : 1)
@@ -1459,8 +1880,12 @@ function renderFrame (time, dt) {
 
   // mirror floor, under the grid; hidden when the camera dips below it
   const mirrorPlane = -Math.max(0, settings.reflectionDepth)
+  // the well (tunnel) sinks below the mirror plane: its reflection would
+  // float above the floor, so the mirror fades out with it (the other
+  // shapes rest on the floor and reflect correctly)
   const reflection = (q >= 2 ? 0 : settings.reflectionAmount) *
-    smoothstep(mirrorPlane, mirrorPlane + 0.15, frameCenter.eyeZ)
+    smoothstep(mirrorPlane, mirrorPlane + 0.15, frameCenter.eyeZ) *
+    (1 - Math.min(1, shapeLook.weights[0]))
   if (reflection > 1e-3) {
     const scale = Math.min(Math.max(settings.reflectionScale, 0.25), 1)
     renderReflection.render({
@@ -1498,6 +1923,8 @@ function renderFrame (time, dt) {
         trebleGain: settings.dustTreble,
         sparkle: settings.dustSparkle,
         sparkleShare: settings.dustSparkleShare,
+        hat: settings.hatDust * (reducedMotion ? 0.5 : 1),
+        hatShare: settings.hatDustShare,
         size: settings.dustSize,
         speed: settings.dustSpeed,
         share: settings.dustDensity,
@@ -1516,7 +1943,8 @@ function renderFrame (time, dt) {
         life: settings.sparksLife,
         streak: settings.sparksStreak,
         width: settings.sparksWidth,
-        floorZ: reflection > 1e-3 ? mirrorPlane : -0.25,
+        // (deeper in a well: sparks thrown from its walls fall down it)
+        floorZ: reflection > 1e-3 ? mirrorPlane : -0.25 - 2 * shapeLook.weights[0],
         floorSoft: reflection > 1e-3 ? 0.015 : 0.12,
         maxBright: 4 * additiveGain,
         force: warmingUp
@@ -1533,18 +1961,62 @@ function renderFrame (time, dt) {
       dt,
       view: frameView,
       projection: frameProjection,
-      historyWeight: settings.taaHistory,
-      clip: settings.taaClip,
-      reproject: settings.taaReproject
+      // the reprojection follows a plane: on a 3D shape it is only right
+      // near the shape's centre height, so the history weighs less (down
+      // to 0.75 per 1/60 s) and is fully clipped as the shape grows
+      historyWeight: Math.min(settings.taaHistory, 1 - (1 - settings.taaHistory) * (1 + 1.5 * Math.min(1, shapeLook.total))),
+      clip: Math.max(settings.taaClip, Math.min(1, shapeLook.total)),
+      reproject: settings.taaReproject,
+      planeHeight: shapeLook.center[2]
     })
     : sceneFbo
+
+  // god rays toward the grid centre, on kicks and drops (the fog glows
+  // around the same source)
+  const raysIntensity = settings.godRays * intro * frameCenter.visible *
+    (settings.godRaysBase + settings.godRaysKick * features.kick +
+      settings.godRaysDrop * section.drop)
+
+  // volumetric ground fog on the composed scene: after TAA (its history,
+  // like the motion-blur trails, must never hold the fog), before the depth
+  // of field, the rays and the bloom. Quarter resolution and one noise
+  // octave from governor level 2 (and on touch devices), off from level 4
+  const fogLevel = updateFog(dt, q, reducedMotion) * intro
+  const sceneFogged = fogLevel > 1e-3 || warmingUp
+    ? renderFog.render({
+      scene: sceneOut,
+      width,
+      height,
+      view: frameView,
+      center: shapeLook.center,
+      // the well's bottom (render-grid SHAPE.tunnelDepth / rim) and a
+      // bounding radius of the raised shapes (ball, dome, ring)
+      wellDepth: 1.8 * shapeLook.weights[0],
+      wellRadius: 1.35,
+      occluderRadius: 0.85 * (0.7 * shapeLook.weights[2] + 0.9 * shapeLook.weights[1] + 1.1 * shapeLook.weights[3]),
+      scale: (coarsePointer ? 0.25 : 0.5) * (q >= 2 ? 0.5 : 1),
+      octaves: coarsePointer || q >= 2 ? 1 : 2,
+      density: fogLevel,
+      heightScale: settings.volFogHeight,
+      noise: settings.volFogNoise,
+      noiseScale: FOG_NOISE_SCALE,
+      noiseOffset: fogLook.offset,
+      baseColor: fogLook.base,
+      lightColor: fogLook.light,
+      lightDir: gridProps.lightDir,
+      glowUv: frameCenter.uv,
+      glowAmount: frameCenter.visible * (0.15 + 0.6 * Math.min(raysIntensity, 0.6))
+    })
+    : sceneOut
+  // fog off (slider at 0, governor level 4): free its full-res buffer
+  if (sceneFogged === sceneOut) renderFog.release()
 
   // light depth of field around the projected grid centre
   const dofAmount = q >= 1 ? 0 : settings.dofAmount
   const dofOn = dofAmount > 1e-3
   const sceneFinal = dofOn
     ? renderDof.render({
-      scene: sceneOut,
+      scene: sceneFogged,
       width,
       height,
       focus: frameCenter.uv,
@@ -1554,15 +2026,11 @@ function renderFrame (time, dt) {
       falloff: settings.dofFalloff,
       foreground: settings.dofForeground
     })
-    : sceneOut
+    : sceneFogged
 
-  // god rays toward the grid centre, on kicks and drops
-  const raysIntensity = settings.godRays * intro * frameCenter.visible *
-    (settings.godRaysBase + settings.godRaysKick * features.kick +
-      settings.godRaysDrop * section.drop)
   const rays = raysIntensity > 1e-3
     ? renderGodrays.render({
-      source: sceneOut,
+      source: sceneFogged,
       width,
       height,
       light: frameCenter.uv,
@@ -1602,8 +2070,16 @@ function renderFrame (time, dt) {
     })
     : null
 
-  // section grading (identity in a groove-dominant state)
+  // section grading (identity in a groove-dominant state), then the
+  // section LUTs with the same weights; the LUT amount eases (1 s) so the
+  // governor's level 6 (LUT off: 2 full-res fetches saved) never pops
   updateGrade(Math.min(1, Math.max(0, settings.grading)))
+  const lutTarget = q >= 6 ? 0 : Math.min(1, Math.max(0, Number(settings.lutAmount) || 0))
+  lutLevel += (lutTarget - lutLevel) * (1 - Math.exp(-Math.min(Math.max(dt, 0), 0.25) / 1))
+  if (!Number.isFinite(lutLevel)) lutLevel = 0
+  // land exactly on the target: a steady section then rebuilds nothing
+  if (Math.abs(lutTarget - lutLevel) < 0.002) lutLevel = lutTarget
+  renderLut.update(lookWeights, lutLevel)
   renderPost.render({
     scene: sceneFinal,
     bloom: bloom.texture,
@@ -1630,6 +2106,11 @@ function renderFrame (time, dt) {
     flaresIntensity: warmingUp ? 0 : flaresIntensity,
     dirt: lensDirt.texture,
     lensDirt: settings.lensDirt,
-    grade
+    grade,
+    tonemapper: settings.tonemapper,
+    agxLook: settings.agxLook,
+    agxLookAmount: settings.agxLookAmount,
+    agxWhite: settings.agxWhite,
+    lut: renderLut
   })
 }
