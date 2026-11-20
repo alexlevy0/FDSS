@@ -5,6 +5,8 @@
 // -100..-30 dB, smoothing 0.8): that is what the old stereo setup actually
 // used, since the fftSize/decibel tweaks were set on an array and ignored.
 // The visuals were tuned against these values, so they are kept as is.
+// A second analyser with the same settings reads the right channel, for the
+// stereo features (bandsL / bandsR).
 export default function createAudio (src) {
   const element = new window.Audio()
   element.preload = 'auto'
@@ -16,16 +18,30 @@ export default function createAudio (src) {
   source.connect(context.destination)
 
   const splitter = context.createChannelSplitter(2)
-  const analyser = context.createAnalyser()
-  analyser.fftSize = 2048
-  analyser.minDecibels = -100
-  analyser.maxDecibels = -30
-  analyser.smoothingTimeConstant = 0.8
+  const createChannelAnalyser = () => {
+    const a = context.createAnalyser()
+    a.fftSize = 2048
+    a.minDecibels = -100
+    a.maxDecibels = -30
+    a.smoothingTimeConstant = 0.8
+    return a
+  }
+  // one analyser per channel, same settings; `analyser` stays the left one
+  // (layout, bin count and decibel range are read from it)
+  const analyser = createChannelAnalyser()
   source.connect(splitter)
   splitter.connect(analyser, 0)
+  let analyserR = null
+  try {
+    analyserR = createChannelAnalyser()
+    splitter.connect(analyserR, 1)
+  } catch (e) {
+    analyserR = null
+  }
 
   const freqData = new Uint8Array(analyser.frequencyBinCount)
   const floatFreqData = new Float32Array(analyser.frequencyBinCount)
+  const floatFreqDataR = analyserR ? new Float32Array(analyserR.frequencyBinCount) : null
 
   // Resolves once the track's metadata is known; rejects if it fails to
   // load. Nothing should block on it: iOS Safari fetches nothing before a
@@ -40,6 +56,7 @@ export default function createAudio (src) {
     ready,
     context,
     analyser,
+    analyserR,
     sampleRate: context.sampleRate,
     frequencies () {
       analyser.getByteFrequencyData(freqData)
@@ -50,6 +67,14 @@ export default function createAudio (src) {
     floatFrequencies () {
       analyser.getFloatFrequencyData(floatFreqData)
       return floatFreqData
+    },
+    // right channel, same format; null when there is no second analyser.
+    // A mono file gives a silent right channel here (the splitter does not
+    // up-mix): the analysis detects that and falls back to the left one.
+    floatFrequenciesR () {
+      if (!analyserR) return null
+      analyserR.getFloatFrequencyData(floatFreqDataR)
+      return floatFreqDataR
     },
     // Resolves true if playback started, false if the browser blocked it
     // (autoplay policy: no user gesture yet).

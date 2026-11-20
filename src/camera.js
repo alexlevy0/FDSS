@@ -21,6 +21,51 @@ import createCamera from '3d-view-controls'
 
 const TAU = Math.PI * 2
 
+// Roaming "shots": each one is a parametric path around the origin, given
+// as cylindrical parameters at the shared roaming angle `rads` (so a change
+// of shot never swings the camera around): ellipse radii rx / ry, eye
+// height z, look-at height tz, angular speed factor and drift factor.
+// `t` is the time since the shot started (the dive closes in over time).
+// A switch blends the parameters of the two paths (both keep moving) with
+// an eased curve, so there is never a cut.
+const SHOTS = {
+  // the original ellipse, rising and falling once per revolution
+  classic (o, rads) {
+    o.rx = 1.5; o.ry = 2.7
+    o.z = (Math.sin(rads) * 0.5 + 0.5) * 3 + 0.5
+    o.tz = 0; o.speed = 1; o.drift = 1
+  },
+  // high, slow and wide: the whole grid in view
+  wide (o, rads) {
+    o.rx = 3.3; o.ry = 3.8
+    o.z = 2.9 + 0.5 * Math.sin(rads * 0.5 + 1)
+    o.tz = 0; o.speed = 0.5; o.drift = 1.2
+  },
+  // almost straight down, slowly turning (never exactly vertical: the
+  // controls keep a z-up camera)
+  top (o) {
+    o.rx = 0.75; o.ry = 0.9
+    o.z = 4.3
+    o.tz = 0; o.speed = 0.55; o.drift = 0.5
+  },
+  // low grazing fly-over, faster, just above the peaks
+  graze (o, rads) {
+    o.rx = 1.85; o.ry = 2.25
+    o.z = 0.55 + 0.12 * Math.sin(rads * 3)
+    o.tz = 0.1; o.speed = 1.35; o.drift = 0.45
+  },
+  // slow dive toward the centre, closing in over ~20 s then holding
+  dive (o, rads, t) {
+    const p = 1 - Math.exp(-t / 22)
+    o.rx = 3.0 - 1.8 * p; o.ry = 3.3 - 2.0 * p
+    o.z = 3.4 - 2.4 * p
+    o.tz = 0; o.speed = 0.7 + 0.5 * p; o.drift = 0.7
+  }
+}
+export const CAMERA_SHOTS = Object.keys(SHOTS)
+const PARAMS = ['rx', 'ry', 'z', 'tz', 'speed', 'drift']
+const newParams = () => ({ rx: 0, ry: 0, z: 0, tz: 0, speed: 1, drift: 1 })
+
 export default function createRoamingCamera (canvas, initialEye, initialTarget) {
   const settings = {
     roam: true,
@@ -29,7 +74,9 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     resumeDuration: 4, // seconds to ease back onto the path
     drift: 1, // drift amplitude multiplier (0 = perfect ellipse)
     nudgeFrequency: 2.4, // Hz of the kick spring
-    nudgeDamping: 0.55 // damping ratio of the kick spring (<1 overshoots a bit)
+    nudgeDamping: 0.55, // damping ratio of the kick spring (<1 overshoots a bit)
+    shots: true, // let the director switch shots (off: back to 'classic')
+    shotTransition: 7 // seconds of the eased blend between two shots
   }
 
   const camera = createCamera(canvas, {
@@ -43,10 +90,76 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
 
   // ---- roaming path -------------------------------------------------------
 
+  // ---- shots ----------------------------------------------------------------
+
+  let shot = 'classic'
+  let shotTime = 0 // s since the current shot started
+  // previous shot while blending: a live shot (name + its own time) or, if
+  // the switch came in the middle of another blend, a frozen snapshot
+  let fromShot = null
+  let fromTime = 0
+  const fromFrozen = newParams()
+  let blendT = 1
+  let blendDuration = 7
+  const pCur = newParams()
+  const pFrom = newParams()
+  const params = newParams()
+
+  const ease = (x) => x * x * x * (x * (x * 6 - 15) + 10) // smootherstep
+
+  // blended shot parameters at angle rads
+  function shotParams (out, rads) {
+    SHOTS[shot](pCur, rads, shotTime)
+    if (blendT >= 1) {
+      for (const k of PARAMS) out[k] = pCur[k]
+      return out
+    }
+    if (fromShot) SHOTS[fromShot](pFrom, rads, fromTime)
+    const src = fromShot ? pFrom : fromFrozen
+    const s = ease(blendT)
+    for (const k of PARAMS) out[k] = src[k] + (pCur[k] - src[k]) * s
+    return out
+  }
+
+  function setShot (name, duration) {
+    if (!SHOTS[name]) return
+    if (name === shot) return
+    const d = duration === undefined ? settings.shotTransition : duration
+    if (state === 'user' || !(d > 0)) {
+      // the user holds the camera (resuming eases back anyway), or no blend
+      shot = name
+      shotTime = 0
+      blendT = 1
+      fromShot = null
+      return
+    }
+    if (blendT < 1) {
+      shotParams(fromFrozen, rads)
+      fromShot = null
+    } else {
+      fromShot = shot
+      fromTime = shotTime
+    }
+    shot = name
+    shotTime = 0
+    blendT = 0
+    blendDuration = d
+  }
+
+  function stepShot (dt) {
+    shotTime += dt
+    fromTime += dt
+    if (blendT < 1) {
+      blendT = Math.min(1, blendT + dt / Math.max(0.01, blendDuration))
+      if (blendT >= 1) fromShot = null
+    }
+  }
+
   function ellipse (out, rads) {
-    out[0] = Math.sin(rads) * 1.5
-    out[1] = Math.cos(rads) * 2.7
-    out[2] = (Math.sin(rads) * 0.5 + 0.5) * 3 + 0.5
+    shotParams(params, rads)
+    out[0] = Math.sin(rads) * params.rx
+    out[1] = Math.cos(rads) * params.ry
+    out[2] = params.z
     return out
   }
 
@@ -78,15 +191,18 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
 
   const tmpDrift = new Float64Array(3)
   function pathEye (out, rads, t) {
-    ellipse(out, rads)
-    drift(tmpDrift, t, settings.drift)
+    ellipse(out, rads) // also leaves the blended shot params in `params`
+    drift(tmpDrift, t, settings.drift * params.drift)
     out[0] += tmpDrift[0]
     out[1] += tmpDrift[1]
     out[2] += tmpDrift[2]
     return out
   }
+  // call after pathEye (uses the shot params it computed)
   function pathTarget (out, t) {
-    return targetDrift(out, t, settings.drift)
+    targetDrift(out, t, settings.drift)
+    out[2] += params.tz
+    return out
   }
 
   // ---- state --------------------------------------------------------------
@@ -239,6 +355,7 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     stepNudge(dt)
 
     if (!started) return
+    stepShot(dt)
 
     if (!settings.roam) {
       if (state !== 'user') state = 'user'
@@ -249,7 +366,8 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
 
     if (state === 'roaming') {
       roamTime += dt
-      rads = (rads + settings.roamSpeed * dt) % TAU
+      shotParams(params, rads)
+      rads = (rads + settings.roamSpeed * params.speed * dt) % TAU
       pathEye(eye, rads, roamTime)
       pathTarget(target, roamTime)
       camera.lookAt(eye, target)
@@ -258,7 +376,8 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
       const s = smooth(Math.min(1, resumeT))
       // speed ramps up with the blend so the motion starts gently
       roamTime += dt * s
-      rads = (rads + settings.roamSpeed * dt * s) % TAU
+      shotParams(params, rads)
+      rads = (rads + settings.roamSpeed * params.speed * dt * s) % TAU
       pathEye(tmp, rads, roamTime)
       for (let i = 0; i < 3; i++) eye[i] = resumeEye[i] + (tmp[i] - resumeEye[i]) * s
       pathTarget(tmp, roamTime)
@@ -293,6 +412,9 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     getMatrix,
     getCenter,
     getState,
+    setShot,
+    getShot: () => shot,
+    shots: CAMERA_SHOTS,
     nudge,
     kick: nudge,
     settings
