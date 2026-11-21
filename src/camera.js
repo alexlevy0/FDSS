@@ -69,8 +69,32 @@ const SHOTS = {
   }
 }
 export const CAMERA_SHOTS = Object.keys(SHOTS)
-const PARAMS = ['rx', 'ry', 'z', 'tz', 'speed', 'drift', 'lookAhead']
-const newParams = () => ({ rx: 0, ry: 0, z: 0, tz: 0, speed: 1, drift: 1, lookAhead: 0 })
+
+// Adaptive framing per shot (see the framing section below). The framing
+// is relative to each shot's own nominal framing of the whole fabric, so the
+// shots' designed dollies and rises survive; [fmin, fmax] bound the distance
+// factor so each shot keeps its character (wide stays wide, graze and dive
+// keep their low / close feel and are barely touched), and `center` is the
+// fraction of the fabric's off-centre offset that is corrected (wide and
+// graze look past the centre on purpose, to take in the history landscape,
+// so they are only partly re-centred).
+const SHOT_FRAMING = {
+  classic: { fmin: 0.6, fmax: 1.5, center: 0.8 },
+  wide: { fmin: 0.8, fmax: 1.4, center: 0.35 },
+  top: { fmin: 0.6, fmax: 1.5, center: 0.9 },
+  graze: { fmin: 0.95, fmax: 1.05, center: 0.3 },
+  dive: { fmin: 0.9, fmax: 1.1, center: 0.7 }
+}
+function framingParams (o, name) {
+  const f = SHOT_FRAMING[name]
+  o.fmin = f.fmin; o.fmax = f.fmax; o.center = f.center
+  return o
+}
+
+const PARAMS = ['rx', 'ry', 'z', 'tz', 'speed', 'drift', 'lookAhead', 'fmin', 'fmax', 'center']
+const newParams = () => ({
+  rx: 0, ry: 0, z: 0, tz: 0, speed: 1, drift: 1, lookAhead: 0, fmin: 0.6, fmax: 1.5, center: 1
+})
 
 // per-shot path variation of a hard cut (identity: no variation)
 const newVariation = () => ({ rx: 1, ry: 1, z: 1, tz: 0, speed: 1, lookAhead: 1 })
@@ -112,7 +136,14 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     shots: true, // let the director switch shots (off: back to 'classic')
     lookAhead: 1, // scales each shot's look past the centre (0 = always the centre)
     shotTransition: 7, // seconds of the eased blend between two shots
-    cutVariation: 1 // 0..1, how far a hard cut varies its shot's path
+    cutVariation: 1, // 0..1, how far a hard cut varies its shot's path
+    // adaptive framing of the roaming path (see the framing section)
+    autoFraming: true,
+    // target extent of the lit fabric, relative to the shot's own framing of
+    // the whole fabric: at 0.8 the lit part is framed like the whole fabric
+    // (closer when only a part is lit), higher fills more, lower leaves room
+    framingFill: 0.8,
+    framingSpeed: 6 // s for the dolly / re-centring to settle (x 2 reduced motion)
   }
 
   const camera = createCamera(canvas, {
@@ -150,6 +181,7 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
   // blended shot parameters at angle rads
   function shotParams (out, rads) {
     SHOTS[shot](pCur, rads, shotTime)
+    framingParams(pCur, shot)
     applyVariation(pCur, curVar)
     if (blendT >= 1) {
       for (const k of PARAMS) out[k] = pCur[k]
@@ -157,6 +189,7 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     }
     if (fromShot) {
       SHOTS[fromShot](pFrom, rads, fromTime)
+      framingParams(pFrom, fromShot)
       applyVariation(pFrom, fromVar)
     }
     const src = fromShot ? pFrom : fromFrozen
@@ -228,6 +261,7 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     shotTime = 0
     blendT = 1
     fromShot = null
+    framing.snap = true // a cut lands framed: no visible dolly after it
     return true
   }
 
@@ -292,9 +326,10 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
   const tmpDrift = new Float64Array(3)
   function pathEye (out, rads, t) {
     ellipse(out, rads) // also leaves the blended shot params in `params`
-    out[0] *= frame.radius
-    out[1] *= frame.radius
-    out[2] = out[2] * frame.radius + frame.targetZ + frame.eyeRise
+    const radius = frame.radius * framing.factor
+    out[0] *= radius
+    out[1] *= radius
+    out[2] = out[2] * radius + frame.targetZ + frame.eyeRise
     drift(tmpDrift, t, settings.drift * params.drift)
     out[0] += tmpDrift[0]
     out[1] += tmpDrift[1]
@@ -306,10 +341,259 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
   function pathTarget (out, t, r) {
     targetDrift(out, t, settings.drift)
     out[2] += params.tz + frame.targetZ
-    const la = params.lookAhead * Math.max(0, settings.lookAhead) * frame.radius
+    const la = params.lookAhead * Math.max(0, settings.lookAhead) * frame.radius * framing.factor
     out[0] -= Math.sin(r) * la
     out[1] -= Math.cos(r) * la
     return out
+  }
+
+  // ---- adaptive framing ---------------------------------------------------
+  //
+  // index.js hands over a few world points of the deformed fabric
+  // (setFramingPoints): the lit part of the base plane on the 3D shape, at
+  // the floor and at a slow height estimate, plus a reference lattice of the
+  // whole plane at the floor. Each frame both are projected (same fov as
+  // the scene, unjittered): the lit points through the framed path pose,
+  // the reference through the shot's own un-framed pose (factor 1, no
+  // offset). The target is the reference's extent, so the whole fabric at
+  // the default framingFill keeps each shot's nominal framing (its own dolly
+  // and rise survive); only how the lit region deviates from the whole
+  // fabric (music, shape morph) is corrected, by two slow critically damped
+  // springs:
+  //   - a distance factor on the path (like setFrame's radius: the path is
+  //     scaled around the shape's centre, so the shot's angles are kept),
+  //   - an offset of the look-at point in the camera's right / up plane
+  //     (only the target moves: rotating never lowers the eye into the
+  //     fabric on low shots).
+  // Distance is smoothed in log space and bounded per shot. Only the
+  // roaming path is adjusted: while the user holds the camera nothing is
+  // measured, and resuming eases onto the framed path. A hard cut snaps the
+  // framing for the new shot in the cut frame.
+  const TAN_HALF_FOV = Math.tan(Math.PI / 8) // the scene's fov is PI / 4
+  const FRAME_LIM = 2 // NDC clamp of the measured box (overflow saturates)
+  const FILL_NOMINAL = 0.8 // framingFill that keeps the shots' own framing
+  const framing = {
+    factor: 1, // distance factor applied to the path
+    logF: 0, // log of factor, and its spring velocity
+    logV: 0,
+    ox: 0, // look-at offset: right, in half-widths of the view at the target
+    oy: 0, // up, in half-heights
+    vx: 0,
+    vy: 0,
+    snap: true, // next update lands at once (first frame, after a cut)
+    points: null,
+    count: 0,
+    refPoints: null,
+    refCount: 0,
+    aspect: 16 / 9,
+    // last measurement
+    ratio: 1, // current extent / target extent (> 1: too big)
+    cx: 0, // off-centre offset of the lit fabric in the framed pose, NDC
+    cy: 0,
+    fill: 0, // measured extent, fraction of the frame on its fuller axis (GUI readout)
+    fillRef: 0 // the whole fabric's extent in the shot's own pose
+  }
+
+  // points: flat array of xyz (count points), the lit fabric; refPoints /
+  // refCount: the whole plane; aspect: canvas width / height
+  const clampCount = (n, arr) => Math.max(0, Math.min(n | 0, arr ? Math.floor(arr.length / 3) : 0))
+  function setFramingPoints (points, count, aspect, refPoints, refCount) {
+    framing.points = points
+    framing.count = clampCount(count, points)
+    framing.refPoints = refPoints || null
+    framing.refCount = clampCount(refCount, refPoints)
+    if (aspect > 0 && isFinite(aspect)) framing.aspect = Math.min(Math.max(aspect, 0.2), 5)
+  }
+
+  const fF = [0, 0, 0]
+  const fR = [0, 0, 0]
+  const fU = [0, 0, 0]
+  // camera basis of the pose (z up, as lookAtMatrix); false if degenerate
+  function poseBasis (e, c) {
+    let fx = c[0] - e[0]
+    let fy = c[1] - e[1]
+    let fz = c[2] - e[2]
+    const fl = Math.hypot(fx, fy, fz)
+    if (!(fl > 1e-6)) return 0
+    fx /= fl; fy /= fl; fz /= fl
+    // right = f x z
+    let rx = fy
+    let ry = -fx
+    const rl = Math.hypot(rx, ry)
+    if (!(rl > 1e-6)) return 0 // looking straight down: shots never do
+    rx /= rl; ry /= rl
+    fF[0] = fx; fF[1] = fy; fF[2] = fz
+    fR[0] = rx; fR[1] = ry; fR[2] = 0
+    // up = r x f
+    fU[0] = ry * fz
+    fU[1] = -rx * fz
+    fU[2] = rx * fy - ry * fx
+    return fl
+  }
+
+  // screen bounding box (NDC, clamped to +-FRAME_LIM) of n points seen from
+  // the pose e -> c, into box; false if nothing projects
+  const box = { minX: 0, maxX: 0, minY: 0, maxY: 0 }
+  function projectBox (pts, n, e, c) {
+    if (!n || !pts || !poseBasis(e, c)) return false
+    const a = framing.aspect
+    let minX = Infinity
+    let maxX = -Infinity
+    let minY = Infinity
+    let maxY = -Infinity
+    for (let i = 0; i < n; i++) {
+      const dx = pts[i * 3] - e[0]
+      const dy = pts[i * 3 + 1] - e[1]
+      const dz = pts[i * 3 + 2] - e[2]
+      const x = dx * fR[0] + dy * fR[1] + dz * fR[2]
+      const y = dx * fU[0] + dy * fU[1] + dz * fU[2]
+      // a point at or behind the eye is projected at a small positive depth:
+      // it lands far off-screen on the axis it is really off on, and near
+      // its real position on the other (no false overflow on both axes)
+      const z = Math.max(dx * fF[0] + dy * fF[1] + dz * fF[2], 0.05)
+      let nx = x / (z * TAN_HALF_FOV * a)
+      let ny = y / (z * TAN_HALF_FOV)
+      if (!isFinite(nx) || !isFinite(ny)) continue
+      nx = Math.min(Math.max(nx, -FRAME_LIM), FRAME_LIM)
+      ny = Math.min(Math.max(ny, -FRAME_LIM), FRAME_LIM)
+      if (nx < minX) minX = nx
+      if (nx > maxX) maxX = nx
+      if (ny < minY) minY = ny
+      if (ny > maxY) maxY = ny
+    }
+    if (!(maxX >= minX) || !(maxY >= minY)) return false
+    box.minX = minX; box.maxX = maxX; box.minY = minY; box.maxY = maxY
+    return true
+  }
+  // extent of the box on its fuller axis (full frame = 1): a roughly square
+  // fabric is framed by the shorter side, a wide one (graze, a flat plane
+  // seen low) by the width
+  const boxFill = () => Math.max((box.maxX - box.minX) / 2, (box.maxY - box.minY) / 2)
+
+  // measures the framed pose pe -> pt (the lit points) against the shot's
+  // un-framed pose at (r, t) (the whole plane); fills framing.ratio / cx / cy
+  const refEye = [0, 0, 0]
+  const refTarget = [0, 0, 0]
+  function measureFraming (pe, pt, r, t) {
+    // the reference first: pathEye / pathTarget at factor 1, no offset
+    let fillRef = 0
+    if (framing.refCount) {
+      const f = framing.factor
+      framing.factor = 1
+      pathEye(refEye, r, t)
+      pathTarget(refTarget, t, r)
+      framing.factor = f
+      if (projectBox(framing.refPoints, framing.refCount, refEye, refTarget)) fillRef = boxFill()
+    }
+    if (!(fillRef > 0.02)) return false
+    if (!projectBox(framing.points, framing.count, pe, pt)) return false
+    const fill = boxFill()
+    const target = Math.min(Math.max(fillRef * Number(settings.framingFill) / FILL_NOMINAL, 0.1), 2)
+    // and never past the frame's edges, unless the shot's own framing
+    // already overflows them (graze's near edge, dive's close-in)
+    const ratio = Math.max(fill / target, fill / Math.max(1.02, fillRef))
+    framing.fill = fill
+    framing.fillRef = fillRef
+    framing.ratio = isFinite(ratio) ? Math.min(Math.max(ratio, 0.4), 2.5) : 1
+    // centre of the visible part of the box; an axis the fabric overflows
+    // on both sides has no meaningful centre
+    const vx0 = Math.max(box.minX, -1)
+    const vx1 = Math.min(box.maxX, 1)
+    const vy0 = Math.max(box.minY, -1)
+    const vy1 = Math.min(box.maxY, 1)
+    framing.cx = box.minX < -1 && box.maxX > 1 ? 0 : (vx0 + vx1) / 2
+    framing.cy = box.minY < -1 && box.maxY > 1 ? 0 : (vy0 + vy1) / 2
+    return true
+  }
+
+  // critically damped spring step of x toward goal (time constant tau),
+  // exact for a constant goal: no overshoot, no pumping. Results in sp (no
+  // per-frame allocation)
+  const sp = { x: 0, v: 0 }
+  function spring (x, v, goal, tau, dt) {
+    const w = 1 / Math.max(tau, 1e-3)
+    const d = x - goal
+    const e = Math.exp(-w * dt)
+    sp.x = goal + (d + (v + w * d) * dt) * e
+    sp.v = (v - w * (v + w * d) * dt) * e
+  }
+
+  // framing goals from the last measurement (or identity when off)
+  const goal = { logF: 0, ox: 0, oy: 0 }
+  function framingGoal (measured) {
+    if (!settings.autoFraming || !measured) {
+      goal.logF = 0
+      goal.ox = 0
+      goal.oy = 0
+      return
+    }
+    const lo = Math.log(Math.max(params.fmin, 0.1))
+    const hi = Math.log(Math.max(params.fmax, params.fmin, 0.1))
+    // projected size ~ 1 / distance: scale the distance by the ratio
+    goal.logF = Math.min(Math.max(framing.logF + Math.log(framing.ratio), lo), hi)
+    // a fraction k of the whole off-centre error: cx is measured with the
+    // current offset applied, so ox + cx is about the un-offset error (the
+    // offset moves the content at the target's depth by -ox); with k < 1
+    // the shot keeps (1 - k) of its own look past the centre
+    const k = Math.min(Math.max(params.center, 0), 1)
+    goal.ox = Math.min(Math.max(k * (framing.ox + framing.cx), -0.6), 0.6)
+    goal.oy = Math.min(Math.max(k * (framing.oy + framing.cy), -0.6), 0.6)
+  }
+
+  function applyFramingGoal () {
+    framing.logF = goal.logF
+    framing.ox = goal.ox
+    framing.oy = goal.oy
+    framing.logV = framing.vx = framing.vy = 0
+    framing.factor = Math.exp(framing.logF)
+  }
+
+  // shifts the look-at point c (seen from e) by the framing offset
+  function offsetTarget (e, c) {
+    const d = poseBasis(e, c)
+    if (!d || (framing.ox === 0 && framing.oy === 0)) return c
+    const h = d * TAN_HALF_FOV
+    const sx = framing.ox * h * framing.aspect
+    const sy = framing.oy * h
+    for (let i = 0; i < 3; i++) c[i] += fR[i] * sx + fU[i] * sy
+    return c
+  }
+
+  // the framed roaming pose at (rads, t) into pe / pt
+  function pathPose (pe, pt, r, t) {
+    pathEye(pe, r, t)
+    pathTarget(pt, t, r)
+    offsetTarget(pe, pt)
+  }
+
+  // measures the path pose and steps the springs; a snap (cut, first frame)
+  // iterates measure -> apply a few times so the new shot lands framed
+  function updateFraming (pe, pt, r, t, dt, reducedMotion) {
+    // nothing to measure when off: the springs ease back to the plain path
+    const measure = () => settings.autoFraming && measureFraming(pe, pt, r, t)
+    if (framing.snap) {
+      framing.snap = false
+      for (let k = 0; k < 4; k++) {
+        framingGoal(measure())
+        applyFramingGoal()
+        pathPose(pe, pt, r, t)
+      }
+      return
+    }
+    framingGoal(measure())
+    // the springs' time constant: framingSpeed is roughly the settle time
+    const tau = Math.max(0.5, Number(settings.framingSpeed) || 6) / 4 * (reducedMotion ? 2 : 1)
+    spring(framing.logF, framing.logV, goal.logF, tau, dt)
+    framing.logF = sp.x; framing.logV = sp.v
+    spring(framing.ox, framing.vx, goal.ox, tau, dt)
+    framing.ox = sp.x; framing.vx = sp.v
+    spring(framing.oy, framing.vy, goal.oy, tau, dt)
+    framing.oy = sp.x; framing.vy = sp.v
+    if (!isFinite(framing.logF) || !isFinite(framing.logV)) framing.logF = framing.logV = 0
+    if (!isFinite(framing.ox) || !isFinite(framing.vx)) framing.ox = framing.vx = 0
+    if (!isFinite(framing.oy) || !isFinite(framing.vy)) framing.oy = framing.vy = 0
+    framing.factor = Math.exp(framing.logF)
+    // the next frame's path uses the new state; this frame keeps its pose
   }
 
   // ---- state --------------------------------------------------------------
@@ -338,6 +622,7 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     return d > 1e-8
   }
   const tmp = [0, 0, 0]
+  const tmpTarget = [0, 0, 0]
   const cameraUp = new Float32Array(3)
 
   const nowSec = () => (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000
@@ -481,12 +766,13 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
       beginResume()
     }
 
+    const reducedMotion = !!(opts && opts.reducedMotion)
     if (state === 'roaming') {
       roamTime += dt
       shotParams(params, rads)
       rads = (rads + settings.roamSpeed * params.speed * dt) % TAU
-      pathEye(eye, rads, roamTime)
-      pathTarget(target, roamTime, rads)
+      pathPose(eye, target, rads, roamTime)
+      updateFraming(eye, target, rads, roamTime, dt, reducedMotion)
       camera.lookAt(eye, target)
       poseValid = checkPose()
     } else if (state === 'resuming') {
@@ -496,10 +782,12 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
       roamTime += dt * s
       shotParams(params, rads)
       rads = (rads + settings.roamSpeed * params.speed * dt * s) % TAU
-      pathEye(tmp, rads, roamTime)
+      // framing follows the path pose, not the blended one (which starts
+      // from wherever the user left the camera)
+      pathPose(tmp, tmpTarget, rads, roamTime)
+      updateFraming(tmp, tmpTarget, rads, roamTime, dt, reducedMotion)
       for (let i = 0; i < 3; i++) eye[i] = resumeEye[i] + (tmp[i] - resumeEye[i]) * s
-      pathTarget(tmp, roamTime, rads)
-      for (let i = 0; i < 3; i++) target[i] = resumeTarget[i] + (tmp[i] - resumeTarget[i]) * s
+      for (let i = 0; i < 3; i++) target[i] = resumeTarget[i] + (tmpTarget[i] - resumeTarget[i]) * s
       camera.lookAt(eye, target)
       poseValid = checkPose()
       if (resumeT >= 1) state = 'roaming'
@@ -547,6 +835,8 @@ export default function createRoamingCamera (canvas, initialEye, initialTarget) 
     getState,
     setShot,
     setFrame,
+    setFramingPoints,
+    getFraming: () => framing,
     cut,
     getShot: () => shot,
     hasVariation: () => !isIdentity(curVar),
