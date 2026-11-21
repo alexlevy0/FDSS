@@ -12,6 +12,7 @@ import createTitleCard from './title-card'
 import createAudioControls, { isTextField, prefersReducedMotion } from './audio-controls'
 import createLiveInput from './live-input'
 import createRenderBloom from './render-bloom'
+import createRenderMeter from './render-meter'
 import createRenderPost, { AGX_LOOKS } from './render-post'
 import createRenderLut from './render-lut'
 import detectHdr, { HDR_EXTENSIONS } from './gpu-hdr'
@@ -127,6 +128,8 @@ const sceneFbo = regl.framebuffer({
 const renderToScene = regl({ framebuffer: sceneFbo })
 const renderBloom = createRenderBloom(regl, hdrInfo)
 const renderPost = createRenderPost(regl, hdrInfo)
+// scene light meter for the auto exposure and the legibility controls
+const renderMeter = createRenderMeter(regl)
 // per-section 3D colour LUTs (procedural), blended on the CPU into one strip
 // sampled after tone mapping. 32^3 (1024 x 32) on desktop; 16^3 on touch
 // devices (16x less to rebuild during section transitions) and wherever the
@@ -536,6 +539,19 @@ const settings = {
   bloomKick: 1.2, // bloom flash on kicks: intensity * (1 + bloomKick * kick)
 
   exposure: 0.75, // linear gain before tone mapping (tuned with ACES)
+  // Legibility ("anti-blob"): on loud passages the dense bright fabric plus
+  // bloom, god rays, halation and motion-blur trails turns into a soft white
+  // mass where the ribbons can no longer be read. A light meter on the scene
+  // (render-meter) gives a 'saturation' signal from the brightness of the
+  // brightest few % of the frame, averaged over ~20 px cells and a few
+  // beats (thin lines on black score low, a lit white mass high):
+  // the auto exposure lowers the exposure, and the legibility controls raise
+  // the bloom threshold and lower the bloom, rays, halation and trails.
+  // Quiet passages measure below the knee and are left untouched (the auto
+  // exposure only ever darkens).
+  autoExposure: true,
+  autoExposureStrength: 1, // 0 = off .. 2 = twice the correction (EV range clamped)
+  legibility: 0.85, // 0..1, how much the glow layers back off when the image saturates
   // tone mapping: AgX (filmic, bright colours travel to white instead of
   // skewing hue) or ACES (the curve the look was tuned with). AgX gets an
   // automatic extra gain that matches ACES' brightness (render-post)
@@ -910,12 +926,47 @@ function updateStructureStatus (dt) {
     `${features.bpm.toFixed(1)} bpm · ${pct(features.bpmConfidence)}% · ${(features.beat % 4) + 1}/4`
   statusControllers.forEach((c) => c.updateDisplay())
 }
+// legibility state (updateLegibility), declared before its GUI status rows
+const legibility = {
+  frame: 0, // frame counter for the meter's draw cadence
+  stats: null, // last meter statistics
+  measured: false,
+  bright: 0, // meter level (see updateLegibility)
+  satGoal: 0, // saturation target after the hysteresis
+  saturation: 0, // 0..1, eased
+  sinceRead: 0, // frames since the last meter readback
+  sinceDraw: 0, // s since the last meter draw
+  drawn: false, // the meter was drawn since the last readback
+  reset: true, // the next meter draw restarts its time average
+  ev: 0, // auto exposure correction, eased
+  status: { exposure: '0.00 EV', saturation: '0%' }
+}
 const bloomGUI = gui.addFolder('bloom')
 drift.add(bloomGUI.add(settings, 'bloomThreshold', 0, 1).step(0.005).name('threshold'))
 drift.add(bloomGUI.add(settings, 'bloomKnee', 0, 1).step(0.01).name('knee'))
 drift.add(bloomGUI.add(settings, 'bloomIntensity', 0, 3).step(0.01).name('intensity'))
 drift.add(bloomGUI.add(settings, 'bloomScatter', 0, 1).step(0.01).name('scatter'))
 drift.add(bloomGUI.add(settings, 'bloomKick', 0, 4).step(0.05).name('kick flash'))
+// auto exposure + glow back-off on saturated frames, with the live values
+const legibilityGUI = gui.addFolder('legibility')
+legibilityGUI.add(settings, 'autoExposure').name('auto exposure')
+drift.add(legibilityGUI.add(settings, 'autoExposureStrength', 0, 2).step(0.01).name('auto exposure strength'))
+drift.add(legibilityGUI.add(settings, 'legibility', 0, 1).step(0.01).name('glow back-off'))
+const legibilityStatusControllers = [
+  legibilityGUI.add(legibility.status, 'exposure').name('adaptation').disable(),
+  legibilityGUI.add(legibility.status, 'saturation').disable()
+]
+legibilityGUI.close()
+let legibilityStatusTimer = 0
+function updateLegibilityStatus (dt) {
+  legibilityStatusTimer -= dt
+  if (legibilityStatusTimer > 0 || gui._hidden || gui._closed || legibilityGUI._closed) return
+  legibilityStatusTimer = 0.25
+  legibility.status.exposure = `${legibility.ev >= 0 ? '+' : ''}${legibility.ev.toFixed(2)} EV`
+  legibility.status.saturation =
+    `${Math.round(legibility.saturation * 100)}% · bright ${legibility.bright.toFixed(2)}`
+  legibilityStatusControllers.forEach((c) => c.updateDisplay())
+}
 const gridGUI = gui.addFolder('grid')
 gridGUI.add(settings, 'gridLines', 10, 300).step(1).onChange(setup)
 gridGUI.add(settings, 'linesAnimationOffset', 0, 100).step(1)
@@ -1106,6 +1157,12 @@ cameraGUI.add(camera.settings, 'cutVariation', 0, 1).step(0.05).name('cut variat
 cameraGUI.add(settings, 'cutConfidence', 0, 1).step(0.01).name('cut bpm confidence')
 cameraGUI.add(settings, 'cutMinDrop', 0, 1).step(0.01).name('cut min drop')
 cameraGUI.add(camera.settings, 'lookAhead', 0, 2).step(0.05).name('look past centre')
+// adaptive framing: the roaming path dollies / re-centres so the lit fabric
+// is framed like each shot frames the whole fabric (framingFill 0.8; higher
+// = the lit part fills more, closer), within per-shot bounds (camera.js)
+cameraGUI.add(camera.settings, 'autoFraming').name('auto framing')
+drift.add(cameraGUI.add(camera.settings, 'framingFill', 0.3, 1.2).step(0.01).name('framing fill'), { amount: 0.04, absolute: true })
+cameraGUI.add(camera.settings, 'framingSpeed', 1, 20).step(0.5).name('framing speed (s)')
 drift.add(cameraGUI.add(camera.settings, 'roamSpeed', 0, 0.5).step(0.002).name('roam speed'))
 drift.add(cameraGUI.add(camera.settings, 'drift', 0, 3).step(0.05))
 cameraGUI.add(camera.settings, 'resumeDelay', 1, 30).step(0.5).name('resume after (s)')
@@ -1502,6 +1559,99 @@ function updateShapes (dt, q, reducedMotion) {
   shapeFraming(shapeLook.frame, w)
   shapeLook.center[2] = shapeLook.frame[0]
   camera.setFrame(shapeLook.frame[0], shapeLook.frame[1], shapeLook.frame[2])
+  // only the roaming path is framed: no work while it is off or while the
+  // user holds the camera
+  const framingOn = camera.settings.autoFraming && camera.getState() !== 'user'
+  if (framingOn) updateFramingPoints(dt, !framingWasOn)
+  framingWasOn = framingOn
+}
+
+// Sample points of the fabric for the camera's adaptive framing. The whole
+// base plane is not what reads on screen: flat, quiet parts of the fabric
+// are nearly black (and fogged on the far side), the music lights a region
+// that is often much smaller (the low bands sit near the centre). So the
+// plane is binned (8 x 8 cells over [-1, 1]^2) and each cell keeps a slow
+// envelope of its highest point (rises in ~0.7 s, falls in ~5 s: beats
+// never move it). Cells above a fraction of the brightest one are "lit";
+// four points inside each (at +-0.3 of the cell: the corners would pad the
+// box by half a cell of dark fabric), on the current 3D shape (shapePoint),
+// at the floor and lifted by the cell's envelope height, are the points
+// the camera frames. Nothing lit (silence, intro): the whole plane. A 5 x 5
+// lattice of the whole plane at the floor is the reference the camera
+// compares them with (each shot's own framing of the whole fabric). At most
+// 537 shapePoint calls a frame (usually far fewer).
+const FRAMING_BINS = 8
+const framingAct = new Float32Array(FRAMING_BINS * FRAMING_BINS)
+const framingNow = new Float32Array(FRAMING_BINS * FRAMING_BINS)
+// cells x 4 points x 2 layers x xyz
+const framingPoints = new Float32Array(FRAMING_BINS * FRAMING_BINS * 4 * 2 * 3)
+const FRAMING_REF = 5 // reference lattice, per side
+const framingRef = new Float32Array(FRAMING_REF * FRAMING_REF * 3)
+const FRAMING_LIT = 0.25 // fraction of the brightest cell that counts as lit
+let framingWasOn = false
+// restart: the envelopes start from the current heights (after the framing
+// was off or the user held the camera, the stored ones are stale)
+function updateFramingPoints (dt, restart) {
+  const B = FRAMING_BINS
+  framingNow.fill(0)
+  const n = points ? points.length : 0
+  for (let i = 0; i < n; i++) {
+    const v = positions[i * 3 + 2]
+    if (!(v > 0)) continue // also skips NaN
+    const bx = Math.min(B - 1, Math.max(0, Math.floor((positions[i * 3] + 1) * 0.5 * B)))
+    const by = Math.min(B - 1, Math.max(0, Math.floor((positions[i * 3 + 1] + 1) * 0.5 * B)))
+    const c = by * B + bx
+    if (v > framingNow[c]) framingNow[c] = v
+  }
+  const up = restart ? 1 : 1 - Math.exp(-dt / 0.7)
+  const down = restart ? 1 : 1 - Math.exp(-dt / 5)
+  let top = 0
+  for (let c = 0; c < B * B; c++) {
+    const x = Math.min(framingNow[c], 2)
+    const a = framingAct[c]
+    framingAct[c] = a + (x - a) * (x > a ? up : down)
+    if (!Number.isFinite(framingAct[c])) framingAct[c] = 0
+    if (framingAct[c] > top) top = framingAct[c]
+  }
+  const all = !(top > 0.03)
+  const lit = top * FRAMING_LIT
+  // heights as the grid draws them (freq map = value x 1.2, clamped)
+  const hScale = Math.max(0, Number(settings.gridMaxHeight) || 0) * sectionMix('height')
+  const cell = 2 / B
+  const p = shapeLook.point
+  let k = 0
+  for (let c = 0; c < B * B; c++) {
+    const act = framingAct[c]
+    if (!all && !(act >= lit)) continue
+    const cx = ((c % B) + 0.5) * cell - 1
+    const cy = (Math.floor(c / B) + 0.5) * cell - 1
+    const lift = Math.min(1, act * 1.2) * hScale
+    for (let q = 0; q < 4; q++) {
+      // the whole plane (nothing lit): its outer corners, so the box is
+      // the full fabric
+      const o = all ? 0.5 : 0.3
+      const x = cx + ((q & 1) ? o : -o) * cell
+      const y = cy + ((q & 2) ? o : -o) * cell
+      for (let layer = 0; layer < 2; layer++) {
+        shapePoint(p, x, y, layer ? lift : 0, shapeLook.weights, shapeLook.params)
+        framingPoints[k++] = p[0]
+        framingPoints[k++] = p[1]
+        framingPoints[k++] = p[2]
+      }
+    }
+  }
+  let r = 0
+  for (let j = 0; j < FRAMING_REF; j++) {
+    for (let i = 0; i < FRAMING_REF; i++) {
+      shapePoint(p, (2 * i) / (FRAMING_REF - 1) - 1, (2 * j) / (FRAMING_REF - 1) - 1, 0,
+        shapeLook.weights, shapeLook.params)
+      framingRef[r++] = p[0]
+      framingRef[r++] = p[1]
+      framingRef[r++] = p[2]
+    }
+  }
+  camera.setFramingPoints(framingPoints, k / 3,
+    Math.max(1, canvas.width) / Math.max(1, canvas.height), framingRef, r / 3)
 }
 
 // projection and view are computed once per frame in renderFrame (the TAA
@@ -1596,6 +1746,93 @@ const smoothstep = (a, b, x) => {
   return t * t * (3 - 2 * t)
 }
 
+// ---- legibility: auto exposure + glow back-off (settings.autoExposure) ----
+// The meter (render-meter) is drawn every few frames into a GPU-side time
+// average of its cells (time constant BRIGHT_TAU) and read back rarely, at
+// the start of a frame. `bright` is the linear luminance of the scene
+// (scaled by the exposure) in the brightest part of the frame: the mean of
+// the 95th and 98th percentiles of the cells' means, so a few px of crest do
+// not count, a lit area of a few % of the frame does. Each cell is a mean
+// over ~20x20 px: thin lines on black average out with their black gaps and
+// stay low, a dense lit mass does not.
+//
+// The meter sees the scene only, before bloom, god rays, halation and the
+// exposure, i.e. none of the layers its outputs change: no feedback loop
+// through them (the motion-blur trails are in the scene and do get shorter
+// as the image saturates; the hysteresis below absorbs that residual loop).
+//
+// On loud grooves the instantaneous level swings with every kick, so the
+// average spans several beats (BRIGHT_TAU): the outputs follow the groove's
+// level, not each kick (no pumping, kicks keep flashing).
+const BRIGHT_TAU = 1.8 // s, symmetric GPU average of the meter cells
+const METER_READ_PERIOD = 24 // frames between readbacks (~0.4 s at 60 fps)
+const METER_READ_PERIOD_SLOW = 60 // ... when the frame time is over budget
+const SAT_LO = 0.15 // bright level where the glow layers start backing off
+const SAT_HI = 0.5 // ... and where they reach the full legibility amount
+// hysteresis: the saturation target only falls once bright has dropped
+// SAT_HYST below the level that raised it, so a residual loop (shorter
+// trails -> lower meter -> longer trails) cannot cycle
+const SAT_HYST = 0.06
+const AE_KEY = 0.3 // bright level the auto exposure brings a saturated frame back toward
+// fraction of the log excess corrected (1 = all of it): partial, a loud
+// passage must still look louder; the glow back-off does most of the
+// legibility work, the exposure only keeps the cores off the shoulder
+const AE_SLOPE = 0.6
+// the auto exposure only ever darkens: quiet and near-black passages keep
+// their look exactly
+const AE_MIN_EV = -1.5
+// asymmetric easing on the already averaged level, in seconds: down within
+// ~1-2 s, back up more slowly
+const AE_TAU_DOWN = 1.1
+const AE_TAU_UP = 3
+const SAT_TAU_UP = 0.8
+const SAT_TAU_DOWN = 2.5
+const ease = (x, target, dt, tau) => x + (target - x) * (1 - Math.exp(-dt / tau))
+// reads the meter (before this frame draws anything) and eases the outputs
+function updateLegibility (dt, intro) {
+  const d = Math.min(Math.max(dt || 0, 0), 0.1)
+  const L = legibility
+  L.sinceRead++
+  const period = governor.ema > FRAME_BUDGET ? METER_READ_PERIOD_SLOW : METER_READ_PERIOD
+  if (L.drawn && L.sinceRead >= period) {
+    L.sinceRead = 0
+    L.drawn = false
+    const stats = renderMeter.read()
+    // the readback waits for the GPU: the next frame's dt is not a measure
+    // of the scene's cost (governQuality)
+    governor.skipDt = true
+    if (stats) {
+      // relative to the exposure the knees were tuned at
+      const expo = Math.max(0, Number(settings.exposure) || 0) / 0.75
+      const bright = 0.5 * (stats.meanP95 + stats.meanP98) * expo
+      if (Number.isFinite(bright)) {
+        L.bright = bright
+        L.measured = true
+        L.stats = stats
+      }
+    }
+  }
+  // while the title card / intro fades in there is nothing to measure
+  const live = L.measured && intro > 0.99
+  if (live) {
+    const rise = smoothstep(SAT_LO, SAT_HI, L.bright)
+    const fall = smoothstep(SAT_LO - SAT_HYST, SAT_HI - SAT_HYST, L.bright)
+    L.satGoal = Math.min(Math.max(L.satGoal, rise), fall)
+  } else {
+    L.satGoal = 0
+  }
+  L.saturation = ease(L.saturation, L.satGoal, d, L.satGoal > L.saturation ? SAT_TAU_UP : SAT_TAU_DOWN)
+  let evTarget = 0
+  const strength = Math.min(Math.max(Number(settings.autoExposureStrength) || 0, 0), 2)
+  if (settings.autoExposure && live && strength > 0 && L.bright > AE_KEY) {
+    evTarget = Math.max(AE_MIN_EV, -AE_SLOPE * strength * Math.log2(L.bright / AE_KEY))
+  }
+  L.ev = ease(L.ev, evTarget, d, evTarget < L.ev ? AE_TAU_DOWN : AE_TAU_UP)
+  if (!Number.isFinite(L.ev)) L.ev = 0
+  if (!Number.isFinite(L.saturation)) L.saturation = 0
+  if (!Number.isFinite(L.satGoal)) L.satGoal = 0
+}
+
 let lastFrameTime = null
 function startLoop () {
   lastFrameTime = null
@@ -1641,7 +1878,8 @@ const governor = {
   fast: 0, // seconds spent well under budget
   warm: 0, // seconds since start (shader compiles, title card)
   sinceUp: Infinity, // seconds since the last step up
-  upHold: 8 // seconds well under budget before a step up
+  upHold: 8, // seconds well under budget before a step up
+  skipDt: false // the previous frame waited on a readback: ignore its dt
 }
 const FRAME_BUDGET = 0.02 // s, ~50 fps
 const FRAME_GOOD = 0.0135 // s, ~74 fps or a vsync-locked 60 with headroom
@@ -1651,6 +1889,10 @@ function governQuality (dt) {
   const g = governor
   g.warm += dt
   g.sinceUp += dt
+  if (g.skipDt) {
+    g.skipDt = false
+    return
+  }
   g.ema += (dt - g.ema) * (1 - Math.exp(-dt / 0.75))
   if (!quality.auto || g.warm < 4) return
   const before = quality.level
@@ -1685,9 +1927,21 @@ function renderFrame (time, dt) {
   const aaMode = q >= 4 && settings.aa === 'taa' ? 'fxaa' : settings.aa
   drift.update(dt, !gui._hidden && !gui._closed)
   const intro = introAmount(time)
+  // first thing that touches the GPU this frame: the (rare) meter readback
+  // waits for the previous frames to finish, never for this one's passes
+  const meterOn = settings.autoExposure || settings.legibility > 0
+  if (meterOn) {
+    updateLegibility(dt, intro)
+  } else {
+    legibility.saturation = legibility.satGoal = legibility.ev = 0
+    legibility.reset = true // a fresh average when it is turned back on
+  }
+  // how much the glow layers back off: saturation x the legibility master
+  const legible = legibility.saturation * Math.min(1, Math.max(0, Number(settings.legibility) || 0))
   analysis.update(dt)
   const pal = palette.update(dt, features.energy)
   updateStructureStatus(dt)
+  updateLegibilityStatus(dt)
   if (features.onKick) camera.nudge(settings.cameraKick)
   // section mapping, from the SECTION_LOOK table (1 / 0 in a plain groove)
   const section = features.section
@@ -1696,7 +1950,7 @@ function renderFrame (time, dt) {
   const sectionTemp = sectionMix('temp')
   direct(dt)
   updateShapes(dt, q, prefersReducedMotion())
-  camera.tick({ time })
+  camera.tick({ time, reducedMotion: prefersReducedMotion() })
   // a hard cut this frame: no temporal state may carry the previous shot
   // over (TAA history, motion-blur trails, the history landscape's lag)
   const cutNow = director.cutNow
@@ -1847,7 +2101,15 @@ function renderFrame (time, dt) {
   // motion-blur fade per frame, for the amount set per 1/60 s (the trail
   // length no longer depends on the refresh rate)
   const blurStep = Math.min(Math.max(dt, 0), 0.1) * 60
-  const blurFade = 1 - Math.pow(1 - Math.min(Math.max(settings.motionBlurAmount, 0.01), 1), blurStep)
+  // shorter trails when the image saturates: the smear of bright ribbons is
+  // a large part of the white mass on loud passages. motionBlurAmount is the
+  // fade per frame, so the trails get shorter as it moves toward 1. Kept
+  // moderate: the ribbons are blended over the faded buffer, so their faint
+  // parts also settle dimmer with a stronger fade (at 0.6 the fabric between
+  // kicks went nearly black on mix #3)
+  const blurBase = Math.min(Math.max(settings.motionBlurAmount, 0.01), 1)
+  const blurAmount = blurBase + (1 - blurBase) * 0.3 * legible
+  const blurFade = 1 - Math.pow(1 - blurAmount, blurStep)
   // the reflection and the dust are ADDED into the feedback buffer, so they
   // settle at 1 / blurFade times what is drawn each frame. Scale them by
   // blurFade so their brightness does not depend on motionBlurAmount (or on
@@ -2006,8 +2268,9 @@ function renderFrame (time, dt) {
   // god rays toward the grid centre, on kicks and drops (the fog glows
   // around the same source)
   const raysIntensity = settings.godRays * intro * frameCenter.visible *
-    (settings.godRaysBase + settings.godRaysKick * features.kick +
-      settings.godRaysDrop * section.drop)
+    // the steady rays back off on saturated frames, the kick flash less
+    ((settings.godRaysBase + settings.godRaysDrop * section.drop) * (1 - 0.8 * legible) +
+      settings.godRaysKick * features.kick * (1 - 0.25 * legible))
 
   // volumetric ground fog on the composed scene: after TAA (its history,
   // like the motion-blur trails, must never hold the fog), before the depth
@@ -2077,10 +2340,33 @@ function renderFrame (time, dt) {
     source: sceneFinal,
     width,
     height,
-    threshold: settings.bloomThreshold,
+    // a saturated frame only blooms its brightest crests: a dense lit fabric
+    // stays lines instead of becoming a fog of glow
+    threshold: settings.bloomThreshold * (1 + 6 * legible),
     knee: settings.bloomKnee,
     scatter: settings.bloomScatter
   })
+
+  // light meter on the scene alone (render-meter, see updateLegibility):
+  // every 2nd frame, every 4th from governor level 3; its GPU-side average
+  // is read back rarely, at the start of a later frame
+  legibility.sinceDraw += Math.min(Math.max(dt, 0), 0.25)
+  if (meterOn) {
+    legibility.frame = (legibility.frame + 1) % 4
+    if (warmingUp || legibility.frame % (q >= 3 ? 4 : 2) === 0) {
+      renderMeter.draw({
+        source: sceneFinal,
+        width,
+        height,
+        dt: legibility.sinceDraw,
+        tau: BRIGHT_TAU,
+        reset: legibility.reset
+      })
+      legibility.sinceDraw = 0
+      legibility.reset = false
+      legibility.drawn = true
+    }
+  }
 
   // anamorphic streaks on drops (kicks only add to them inside a drop);
   // fewer passes at quality level 2, off from level 3. Below a barely
@@ -2119,12 +2405,13 @@ function renderFrame (time, dt) {
     godraysIntensity: raysIntensity,
     width,
     height,
+    // the base glow backs off more than the kick flash, so kicks still flash
     bloomIntensity:
       (intro *
         settings.bloomIntensity * sectionBloom *
-        (1 + settings.bloomKick * features.kick)) /
+        (1 - 0.55 * legible + settings.bloomKick * features.kick * (1 - 0.25 * legible))) /
       bloom.norm,
-    exposure: settings.exposure,
+    exposure: settings.exposure * Math.pow(2, legibility.ev),
     ca:
       settings.chromaticAberration +
       settings.chromaticKick * features.kick,
@@ -2133,7 +2420,7 @@ function renderFrame (time, dt) {
     vignetteStart: settings.vignetteStart,
     grain: settings.grain,
     halo: bloom.halo,
-    halation: (intro * settings.halation * sectionBloom) / bloom.haloNorm,
+    halation: (intro * settings.halation * sectionBloom * (1 - 0.8 * legible)) / bloom.haloNorm,
     flares,
     flaresIntensity: warmingUp ? 0 : flaresIntensity,
     dirt: lensDirt.texture,
