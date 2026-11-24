@@ -940,6 +940,71 @@
       color: var(--ink);
     }
 
+    .prod-export {
+      margin-top: 0.6rem;
+      padding-top: 0.6rem;
+      border-top: 1px solid var(--ink-faint);
+    }
+
+    .prod-export-idle {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      min-width: 0;
+    }
+
+    .prod-export-idle .prod-hint {
+      min-width: 0;
+    }
+
+    .prod-export-idle[hidden],
+    .prod-export-run[hidden] {
+      display: none;
+    }
+
+    .prod-export-head {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .prod-export-label {
+      flex: 1;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .prod-export-bar {
+      position: relative;
+      height: 3px;
+      margin: 0.5rem 0 0.4rem;
+      border-radius: 2px;
+      background: var(--ink-faint);
+      overflow: hidden;
+    }
+
+    .prod-export-fill {
+      position: absolute;
+      inset: 0;
+      background: var(--ink);
+      transform-origin: 0 50%;
+      transform: scaleX(0);
+    }
+
+    .prod-export-track {
+      display: block;
+      min-height: 1.35em;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      color: var(--ink-dim);
+      font-size: 0.85em;
+    }
+
+    .prod-export-info {
+      white-space: normal;
+      opacity: 0.75;
+    }
+
     .prod-drop {
       position: fixed;
       inset: 0;

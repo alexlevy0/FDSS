@@ -25,8 +25,9 @@
 // context clock. The ramps themselves therefore never depend on timers: a
 // late check (background tab) only shortens the fade to the time actually
 // left. Crossfade length = the setting, clamped to 45% of the shorter of the
-// two tracks. Curves: 'equal' (equal power, cos / sin: constant loudness for
-// uncorrelated tracks) or 'linear'. Pause holds every gain where it is and
+// two tracks (0.05 s or less: a cut). Curves: 'equal' (equal power, cos /
+// sin: constant loudness for uncorrelated tracks) or 'linear'. Both rules
+// live in crossfade.js, shared with the WAV export (playlist-export.js). Pause holds every gain where it is and
 // pauses every sounding deck; play resumes them and reschedules the rest of
 // the fade from the same progress. Seeking during a fade first completes it
 // (the incoming track becomes the only one) and then seeks that track.
@@ -43,9 +44,10 @@
 // new track, or at once for a cut: the moment the visuals may follow the new
 // track) and 'mode' (entered / left) events, plus 'error' with a message.
 
+import { crossfadeLength, fadeGain, MIN_FADE } from './crossfade'
+
 const DECKS = 3
 const PRELOAD_AHEAD = 20 // s before the fade: set the next deck's src
-const MAX_FADE_SHARE = 0.45 // of the shorter track
 const MANUAL_FADE = 2 // s, upper bound for jumps and removals
 const CURVE_POINTS = 64
 const STORAGE_KEY = 'fdss.production'
@@ -204,9 +206,7 @@ export default function createPlaylist (audio, opts = {}) {
   }
 
   function curveValue (entry, p) {
-    if (settings.curve === 'linear') return entry.from + (entry.to - entry.from) * p
-    const a = p * Math.PI / 2
-    return Math.min(1, entry.from * Math.cos(a) + entry.to * Math.sin(a))
+    return fadeGain(settings.curve, entry.from, entry.to, p)
   }
 
   // schedule the fade from progress p0 to 1, starting now
@@ -284,15 +284,12 @@ export default function createPlaylist (audio, opts = {}) {
     return track.duration || 0
   }
 
-  // crossfade length between two tracks: the setting, at most 45% of the
-  // shorter one (unknown durations do not clamp)
+  // crossfade length between two tracks (crossfade.js: the setting, at most
+  // 45% of the shorter one, 0 for a cut; unknown durations do not clamp)
   function fadeLength (a, b, deckB) {
-    let x = settings.crossfade
     const da = a ? trackDuration(a, current) : 0
     const db = b ? trackDuration(b, deckB) : 0
-    if (da > 0) x = Math.min(x, da * MAX_FADE_SHARE)
-    if (db > 0) x = Math.min(x, db * MAX_FADE_SHARE)
-    return Math.max(0, x)
+    return crossfadeLength(settings.crossfade, da, db)
   }
 
   // ---- transport ----
@@ -481,7 +478,7 @@ export default function createPlaylist (audio, opts = {}) {
         decks.find((dk) => dk !== current && dk.el.paused)
       if (free && next !== track) load(free, next)
     }
-    if (x > 0.05 && left <= x + 0.02) crossTo(ni, Math.max(0.05, Math.min(x, left)))
+    if (x > MIN_FADE && left <= x + 0.02) crossTo(ni, Math.max(0.05, Math.min(x, left)))
   }
 
   function onDeckEnded (deck) {
@@ -724,14 +721,7 @@ export default function createPlaylist (audio, opts = {}) {
     let sum = 0
     for (let i = 0; i < ok.length; i++) {
       sum += ok[i].duration || 0
-      if (i > 0) {
-        let x = settings.crossfade
-        const a = ok[i - 1].duration
-        const b = ok[i].duration
-        if (a > 0) x = Math.min(x, a * MAX_FADE_SHARE)
-        if (b > 0) x = Math.min(x, b * MAX_FADE_SHARE)
-        sum -= x
-      }
+      if (i > 0) sum -= crossfadeLength(settings.crossfade, ok[i - 1].duration, ok[i].duration)
     }
     return Math.max(0, sum)
   }
