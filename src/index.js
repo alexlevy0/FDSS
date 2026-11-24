@@ -11,6 +11,8 @@ import createCamera, { CAMERA_SHOTS } from './camera'
 import createTitleCard from './title-card'
 import createAudioControls, { isTextField, prefersReducedMotion } from './audio-controls'
 import createLiveInput from './live-input'
+import createPlaylist from './playlist'
+import createProductionPanel from './production-panel'
 import createRenderBloom from './render-bloom'
 import createRenderMeter from './render-meter'
 import createRenderPost, { AGX_LOOKS } from './render-post'
@@ -193,6 +195,21 @@ const liveSettings = { gain: 1 }
 // per-track cosine palette, crossfaded on track change, drifting with energy
 const palette = createPalette()
 
+// production mode (P): a playlist of dropped files, crossfaded, feeding the
+// same analysers. Entering / leaving it switches source, so the sections and
+// tempo start from scratch, as for the live input. Between two playlist
+// tracks they are NOT reset: the playlist is one continuous mix, like the
+// bundled ones (whose internal transitions the tracker follows on its own),
+// and a reset at each fade would drop the tempo lock and restart the
+// section warm-up in the middle of the music every few minutes. Only the
+// palette follows the tracks, at the middle of each crossfade (when the new
+// track starts to dominate).
+const playlist = createPlaylist(audio, { live })
+playlist.subscribe((type, detail) => {
+  if (type === 'mode') analysis.resetStructure()
+  if (type === 'midpoint' && detail >= 0) palette.setTrack(detail)
+})
+
 // time dimension: the landscape of the last seconds of spectra in rings
 // around the grid, and sparks thrown off the peaks on kicks (smaller on touch devices)
 const renderHistory = createRenderHistory(regl, {
@@ -226,12 +243,19 @@ fontsReady.then(() => {
       // new mix: its sections and tempo start from scratch
       analysis.resetStructure()
     },
-    live
+    live,
+    production: playlist
+  })
+  const productionPanel = createProductionPanel(playlist, audioControls)
+  // back from production: the palette of the mix the player is on
+  playlist.subscribe((type, on) => {
+    if (type === 'mode' && !on) palette.setTrack(audioControls.getCurrentTrack())
   })
 
   function loop () {
     window.requestAnimationFrame(loop)
     audioControls.tick()
+    productionPanel.tick()
   }
 
   setup()
@@ -309,7 +333,9 @@ function playWhenAllowed () {
     if (started || isRunning()) return
     const events = ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown']
     let pending = false
+    let unsubscribe = null
     const remove = () => {
+      if (unsubscribe) { unsubscribe(); unsubscribe = null }
       events.forEach((e) => window.removeEventListener(e, unlock, true))
       audio.element.removeEventListener('play', onPlay)
       if (audio.context) audio.context.removeEventListener('statechange', onPlay)
@@ -325,6 +351,11 @@ function playWhenAllowed () {
       // L starts the live mic itself (and resumes the context): starting
       // the file here too would blip it before the mic takes over
       if (e.type === 'keydown' && e.code === 'KeyL') return
+      // same for P: production mode takes over the audio
+      if (e.type === 'keydown' && e.code === 'KeyP') return
+      // nor once production mode is on: the user has taken the audio over,
+      // and leaving the mode later must not start a mix on the next click
+      if (playlist.isActive()) { remove(); return }
       pending = true
       audio.play().then((ok) => {
         pending = false
@@ -340,6 +371,8 @@ function playWhenAllowed () {
       if (isRunning()) remove()
     }
     events.forEach((e) => window.addEventListener(e, unlock, true))
+    // entering production (P, PROD, a drop) counts as taking control too
+    unsubscribe = playlist.subscribe((type, on) => { if (type === 'mode' && on) remove() })
     audio.element.addEventListener('play', onPlay)
     if (audio.context) audio.context.addEventListener('statechange', onPlay)
   })

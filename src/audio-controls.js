@@ -14,6 +14,11 @@
 // its chooser (micro / tab or screen), the L shortcut, and a live state in
 // which the seek bar and time are hidden, play/pause stops the live input
 // and a track button goes back to the file player.
+// opts.production: optional playlist (playlist.js). While its mode is active
+// the bar drives it instead of the mixes: title = current playlist track,
+// play/pause, seek bar and time act on that track; a mix (or LIVE) leaves
+// the mode. pin(key, on) keeps the bar on screen while something (the
+// production panel) is open.
 
 const reducedMotionQuery = typeof window.matchMedia === 'function'
   ? window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -46,6 +51,8 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   const liveDeviceEl = container.querySelector('.live-device')
   const messageEl = container.querySelector('.live-message')
   const isLive = () => !!(live && live.isActive())
+  const production = opts.production || null
+  const isProd = () => !!(production && production.isActive())
 
   let current = -1 // set by setTrack(0) below
 
@@ -64,6 +71,8 @@ export default function createAudioControls (audio, tracks, opts = {}) {
       // also cancels a pending start (the late stream is discarded), so
       // granting the prompt afterwards does not override this choice.
       if (live) live.stop()
+      // a mix also leaves production mode (the playlist is paused)
+      if (isProd()) production.leave()
       setTrack(i)
       audio.play()
       // after a pointer click (detail > 0), do not leave focus on the pill:
@@ -85,12 +94,18 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     })
     track.el.classList.add('selected')
     track.button.setAttribute('aria-current', 'true')
-    if (!isLive()) renderMeta()
+    if (!isLive() && !isProd()) renderMeta()
     renderTime(true)
     if (changed && onTrackChange) onTrackChange(i, track)
   }
 
   function renderMeta () {
+    if (isProd() && !isLive()) {
+      const t = production.getCurrentTrack()
+      titleEl.textContent = t ? t.name : 'Glisse des morceaux'
+      artistEl.textContent = 'production'
+      return
+    }
     const state = isLive() ? live.getState() : null
     titleEl.textContent = state ? state.label : tracks[current].title
     // the source type, not "live" again (the toggle and the dot say it)
@@ -99,6 +114,7 @@ export default function createAudioControls (audio, tracks, opts = {}) {
 
   // chain the mixes: when one ends, play the next one
   element.addEventListener('ended', () => {
+    if (isProd()) return
     setTrack((current + 1) % tracks.length)
     audio.play()
   })
@@ -112,8 +128,12 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   const PROGRESS_STEPS = 2000 // finer than any seek bar is wide in pixels
 
   function duration () {
-    const d = element.duration
+    const d = isProd() ? production.duration() : element.duration
     return isFinite(d) && d > 0 ? d : 0
+  }
+
+  function position () {
+    return (isProd() ? production.currentTime() : element.currentTime) || 0
   }
 
   function renderTime (force) {
@@ -122,7 +142,7 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     if (!force && (!visible || idle)) return
     if (isLive()) return // no position in a live input (bar and time hidden)
     const d = duration()
-    const t = dragTime !== null ? dragTime : (element.currentTime || 0)
+    const t = dragTime !== null ? dragTime : position()
     if (!force && t === lastShown && d === lastDuration) return
     lastShown = t
     const f = d ? Math.min(1, Math.max(0, t / d)) : 0
@@ -167,7 +187,8 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   function seekTo (t) {
     const d = duration()
     if (!d) return
-    element.currentTime = Math.min(Math.max(0, t), Math.max(0, d - 0.05))
+    if (isProd()) production.seek(t)
+    else element.currentTime = Math.min(Math.max(0, t), Math.max(0, d - 0.05))
     renderTime(true)
   }
 
@@ -207,7 +228,7 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     const d = duration()
     if (!d || isLive()) return
     const step = e.shiftKey ? 30 : 5
-    const now = element.currentTime
+    const now = position()
     let t = null
     switch (e.key) {
       case 'ArrowRight':
@@ -235,6 +256,10 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     // going back to the file cancels a live start still waiting on its
     // prompt / picker (also the startup one of ?live=mic)
     if (live) live.stop()
+    if (isProd()) {
+      production.togglePlay()
+      return
+    }
     // While the audio context is still locked (autoplay policy) the element
     // may report "playing" in silence: treat that as paused and start it.
     const locked = audio.context && audio.context.state !== 'running'
@@ -247,7 +272,7 @@ export default function createAudioControls (audio, tracks, opts = {}) {
 
   function renderPlayState () {
     const liveNow = isLive()
-    const playing = liveNow || !element.paused
+    const playing = liveNow || (isProd() ? production.wantsPlay() : !element.paused)
     playPauseEl.classList.toggle('is-playing', playing)
     playPauseEl.setAttribute('aria-label', liveNow ? 'Arrêter le live' : playing ? 'Pause' : 'Lecture')
     if (!playing) wake()
@@ -271,6 +296,7 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   let idleTimer = null
   const hoverZones = new Set()
   let hoverCount = 0
+  const pins = new Set()
 
   // focus left on a button after a mouse click should not pin the player,
   // only keyboard navigation inside it does: shortcuts such as G or Space
@@ -282,7 +308,8 @@ export default function createAudioControls (audio, tracks, opts = {}) {
   ])
 
   function busy () {
-    if (!isLive() && element.paused) return true
+    if (!isLive() && (isProd() ? !production.wantsPlay() : element.paused)) return true
+    if (pins.size > 0) return true
     if (hoverCount > 0 || dragPointer !== null || menuOpen || messageTimer) return true
     return lastInputWasKeyboard && container.contains(document.activeElement)
   }
@@ -502,6 +529,17 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     })
   }
 
+  // ---- production mode ----
+
+  function renderProd () {
+    const on = isProd()
+    container.classList.toggle('is-prod', on)
+    renderMeta()
+    renderPlayState()
+    renderTime(true)
+  }
+  if (production) production.subscribe((type) => { if (type === 'change' || type === 'mode') renderProd() })
+
   // initial selection, once every piece of state above exists
   setTrack(0)
   renderPlayState()
@@ -532,6 +570,13 @@ export default function createAudioControls (audio, tracks, opts = {}) {
     show,
     wake,
     addHoverZone,
+    // keeps the bar on screen while `on` (e.g. a panel is open)
+    pin (key, on) {
+      if (on) pins.add(key)
+      else pins.delete(key)
+      if (visible) wake()
+    },
+    isShown: () => visible,
     isIdle: () => idle,
     showMessage,
     getCurrentTrack: () => current
