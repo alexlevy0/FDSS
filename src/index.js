@@ -198,9 +198,11 @@ const palette = createPalette()
 const renderHistory = createRenderHistory(regl, {
   rows: coarsePointer ? 96 : 192,
   cols: coarsePointer ? 40 : 64,
-  // samples per column around a ring (2: round at the outer radius; 1
-  // halves the vertex cost, visibly polygonal on the outer rings)
-  sub: 2,
+  // samples per column and per repeat of the spectrum (it runs twice
+  // around a ring): 2 keeps the ridges detailed and the outer rings round
+  // (505 samples a ring at 64 columns); touch devices take 1 (157 samples
+  // at 40 columns: the single-spectrum ring's old cost and angular density)
+  sub: coarsePointer ? 1 : 2,
   bandCount: features.bandCount
 })
 const renderSparks = createRenderSparks(regl, { count: coarsePointer ? 128 : 512 })
@@ -1407,6 +1409,10 @@ function stepSnareAccent (time) {
 
 // smoothed amount of the history landscape (sections / lock)
 let historyLevel = 0
+// the fabric's bounding volume for the history pass (render-history
+// gridBox: half side at the top, lowest and highest z, centre z, half side
+// at the bottom), refreshed per frame
+const historyGridBox = [1.02, 0, 0.35, 0, 1.02]
 
 // Waves, per frame: impulses from this frame's onsets, the bass drive, and
 // the quality tier (resolution / substeps: full up to level 1, 3/4 at 2-3,
@@ -2154,6 +2160,21 @@ function renderFrame (time, dt) {
   // cleared (depth only: the colour is the motion-blur feedback) in the
   // scene pass just above; nothing writes depth before this draw
   if (historyAmount > 1e-3 || warmingUp) {
+    // the fabric's volume: the square (the ball is narrower; the other
+    // shapes stay about inside it), from the well's bottom to the top of
+    // the ball / dome / ring, plus the peaks: a static bound of what the
+    // grid draws (freq map up to 1.2, the full kick pulse, the snare lift,
+    // the waves), so the footprint never pulses with the kicks
+    const sw = shapeLook.weights
+    historyGridBox[0] = 1.02 - 0.3 * sw[2]
+    const peaks = Math.max(0, Number(settings.gridMaxHeight) || 0) * sectionHeight * 1.2 *
+      (1 + Math.max(0, Number(settings.kickHeight) || 0)) +
+      Math.max(0, Number(settings.snareLift) || 0) + Math.max(0, Number(settings.waveAmount) || 0)
+    historyGridBox[1] = -1.85 * sw[0] - 0.02
+    historyGridBox[2] = peaks + 0.55 * sw[1] + 1.45 * sw[2] + 0.7 * sw[3]
+    historyGridBox[3] = shapeLook.center[2]
+    // the well narrows to its throat (radius ~0.45) at the bottom
+    historyGridBox[4] = historyGridBox[0] - sw[0] * (historyGridBox[0] - 0.5)
     renderToScene(() => {
       renderGlobals(() => {
         renderHistory.draw({
@@ -2176,7 +2197,9 @@ function renderFrame (time, dt) {
           projection: frameProjection,
           force: warmingUp,
           // without it: no occlusion between rings (see sceneFbo)
-          depthBuffer: sceneDepth
+          depthBuffer: sceneDepth,
+          // where the rings must leave the fabric clear on screen
+          gridBox: historyGridBox
         })
       })
     })
