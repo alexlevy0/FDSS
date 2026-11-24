@@ -4,7 +4,7 @@ import { paletteGLSL } from './palette'
 // concentric rings of ribbon lines around the grid. The newest row is a
 // ring just outside the grid (radius `start` around the grid centre), older
 // rows are larger rings (start + age * step, out to start + depth), fading
-// with age and distance. Each ring carries its spectrum all the way around.
+// with age and distance. Each ring carries its spectrum twice around.
 //
 // Data: a ring buffer texture, ROWS x COLS, one row per 1/rate s. Each row
 // is the mean of the log bands over that interval, resampled to COLS
@@ -13,15 +13,18 @@ import { paletteGLSL } from './palette'
 // otherwise uint8 (the values are 0..1 anyway). It is only read in the
 // vertex shader, with NEAREST filtering at exact texel centres (no float
 // linear filtering needed); the vertex shader interpolates between columns
-// itself (SUB samples per column, so a ring of radius ~6 stays round).
+// itself (SUB samples per column and per repeat, so a ring of radius ~6
+// stays round).
 //
 // Geometry: static, per row: a filled strip from the line down to the base
 // plane (black: occlusion, Unknown Pleasures style, the stack never piles
 // up into a white mass) and the line itself as screen-space ribbon quads
-// with analytic AA (same technique as render-grid.js). Columns are mirrored
-// around the centre: the lowest band at the centre column, the highs at
-// both ends, which meet at the ring's seam (same value, same point: no
-// taper, no gap).
+// with analytic AA (same technique as render-grid.js). The spectrum runs
+// twice around the ring, mirrored (lows -> highs -> lows -> highs -> lows):
+// the lows on the far side AND on the camera side, the highs on the left
+// and right. The profile is continuous everywhere, and the ring's seam (in
+// the middle of the far-side lows: first and last sample, same value, same
+// point) takes its ribbon tangent across the seam (no kink, no gap).
 //
 // Occlusion: with rings, painter's order by row is wrong on the camera
 // side (older rows are nearer there) and the eye usually stands inside the
@@ -39,20 +42,38 @@ import { paletteGLSL } from './palette'
 // buffer resolves rows ~0.03 apart.
 //
 // Camera inside the landscape: lines and strips fade with the distance
-// from the eye (the area around the camera stays clear: the strips there
-// are collapsed to zero height in the vertex shader, so they neither draw
-// nor write depth, and no fragment shader discards), ribbons fade out
-// before the history near plane (GPU clipping does the rest; no vertex is
-// projected through w <= 0), and the rows between the eye and the grid
-// (camera side, inside the eye's ground radius) are flattened, dimmed and
-// cut to the newest few, their strips dropped, so low shots always see the
-// grid clearly. Over the grid square itself (the newest rings cross its
+// from the eye, over a small clear zone (the strips there are collapsed
+// to zero height in the vertex shader, so they neither draw nor write
+// depth, and no fragment shader discards), and ribbons fade out before the
+// history near plane (GPU clipping does the rest; no vertex is projected
+// through w <= 0). Over the grid square itself (the newest rings cross its
 // corners) the ridges are flat.
 //
-// Orientation: the lows (centre column) face away from the camera, on the
-// far side, the most visible part. The direction follows the camera
-// azimuth, smoothed (it lags behind fast drags; the ring just turns, it is
-// never hidden while it lags); a hard cut snaps it.
+// Keeping the grid clear: only where a ring point actually covers the
+// grid on screen AND stands in front of it is it flattened, dimmed and cut
+// to the newest few rows, its strip dropped (no black slab over the
+// fabric). Everywhere else, the camera side included, the rings draw and
+// occlude in full. Two tests, multiplied:
+// - on screen: the fabric's volume (the square, its corners cut to an
+//   octagon inside the newest ring (what lies past it is under the rings,
+//   flat), narrowing to a well's throat at the bottom, from the deepest
+//   well to the highest shape plus the peaks: see draw()'s gridBox) is
+//   clipped to the front of the camera, projected on the CPU each frame,
+//   and bounded by a 16-sided polygon (the max along 16 fixed screen
+//   directions, in units of half the screen height: within ~2 % of the
+//   exact convex hull); the vertex shader takes its signed distance to
+//   that polygon (16 dot products);
+// - in front: the line of sight from the eye through the point enters the
+//   fabric's column (that octagon, any height) only past the point. A ray
+//   test against 4 slabs per vertex, exact for every part of the fabric
+//   (the rings beside the grid, whose line of sight crosses the fabric's
+//   near corner before reaching them, are behind it and left alone; from
+//   above the grid, eye inside the column, nothing is in front).
+//
+// Orientation: the lows face away from the camera (far side) and toward
+// it (camera side), the highs to the sides. The direction follows the
+// camera azimuth, smoothed (it lags behind fast drags; the ring just
+// turns, it is never hidden while it lags); a hard cut snaps it.
 //
 // The rows scroll continuously (fractional offset between two writes), and
 // stop while the audio is paused.
@@ -63,13 +84,28 @@ const AZIMUTH_FOLLOW = 1.5 // s, smoothing of the landscape direction
 // depth: what is closer is clipped, already faded out), and the fill push
 const DEPTH_NEAR = 0.5
 const FILL_PUSH = 4 / 65536 // NDC: a couple of 16-bit depth steps
+// view depth (world units) under which a corner of the grid box counts as
+// behind the camera (its box edges are clipped there)
+const COVER_NEAR = 0.05
+// the 16 screen directions of the footprint polygon
+const COVER_DIRS = 16
+const coverCos = new Float32Array(COVER_DIRS)
+const coverSin = new Float32Array(COVER_DIRS)
+for (let k = 0; k < COVER_DIRS; k++) {
+  coverCos[k] = Math.cos((k * TAU) / COVER_DIRS)
+  coverSin[k] = Math.sin((k * TAU) / COVER_DIRS)
+}
+const glslVec4 = (a, k) => `vec4(${[0, 1, 2, 3].map((j) => a[k + j].toFixed(7)).join(', ')})`
 
 export default function createRenderHistory (regl, opts = {}) {
   const ROWS = Math.max(8, (opts.rows || 192) | 0)
   const COLS = Math.max(4, (opts.cols || 64) | 0)
-  const SUB = Math.max(1, (opts.sub || 2) | 0) // samples per column
+  // samples per column, per repeat of the spectrum (>= 1: a sample's
+  // neighbours stay within the 4 columns the line shader fetches)
+  const SUB = Math.max(1, Number(opts.sub) || 2)
   const bandCount = Math.max(1, (opts.bandCount || 200) | 0)
-  const NX = 2 * SUB * (COLS - 1) + 1 // samples around a ring (mirrored)
+  const QUARTER = Math.max(1, Math.round(SUB * (COLS - 1))) // samples, lows to highs
+  const NX = 4 * QUARTER + 1 // samples around a ring (twice the spectrum, mirrored)
   const SEGS = NX - 1
 
   const limits = regl.limits
@@ -286,8 +322,7 @@ export default function createRenderHistory (regl, opts = {}) {
   const defines = `
     #define ROWS ${f1(ROWS)}
     #define COLS ${f1(COLS)}
-    #define SUB ${f1(SUB)}
-    #define CENTER ${f1(SUB * (COLS - 1))}
+    #define QUARTER ${f1(QUARTER)}
     #define LAST ${f1(NX - 1)}
     #define DEPTH_NEAR ${DEPTH_NEAR.toFixed(3)}
     #define FILL_PUSH ${FILL_PUSH.toExponential(6)}
@@ -305,7 +340,16 @@ export default function createRenderHistory (regl, opts = {}) {
     uniform float scroll;
     uniform vec2 dirB; // unit, along the ground: where the lows face
     uniform vec3 eye; // world position of the camera
-    uniform float eyeR; // its ground distance from the grid centre
+    // the grid's screen footprint: max along the 16 screen directions
+    // k * 22.5 deg (k = 0..3 in coverA, 4..7 in coverB...), in units of
+    // half the screen height
+    uniform vec4 coverA;
+    uniform vec4 coverB;
+    uniform vec4 coverC;
+    uniform vec4 coverD;
+    // the fabric's column (world, around the z axis): half widths of the
+    // octagon along x / y (x) and along the diagonals (y)
+    uniform vec2 gridColumn;
     uniform float startDist;
     uniform float rowStep;
     uniform float heightScale;
@@ -336,25 +380,64 @@ export default function createRenderHistory (regl, opts = {}) {
       return row + ROWS * step(row, -0.5);
     }
 
-    // fractional column of sample i (mirrored: lows at the centre)
+    // fractional column of sample i: a triangle wave, twice around the
+    // ring (lows at samples 0, 2Q, 4Q: dirB and -dirB; highs at Q, 3Q).
+    // At a multiple of 2Q, mod() may round to 0 or 2Q: both give column 0
     float columnOf(float i) {
-      return abs(i - CENTER) / SUB;
+      return (QUARTER - abs(mod(i, 2.0 * QUARTER) - QUARTER)) * (COLS - 1.0) / QUARTER;
     }
 
-    // unit ground direction of sample i: the lows (centre) along dirB,
-    // both ends (the highs) meet on the opposite side
+    // unit ground direction of sample i: the far-side lows along dirB,
+    // the camera-side lows along -dirB, the highs to the sides
     vec2 radial(float i) {
-      float th = PI * (i - CENTER) / CENTER;
+      float th = 2.0 * PI * i / LAST;
       vec2 side = vec2(-dirB.y, dirB.x);
       return dirB * cos(th) + side * sin(th);
     }
 
-    // 1 for ground points between the eye and the grid (camera side,
-    // inside the eye's ground radius), 0 elsewhere
-    float frontOf(vec2 g) {
-      float r = length(g);
-      float c = dot(g, eye.xy) / max(r * eyeR, 1e-4);
-      return smoothstep(0.1, 0.8, c) * smoothstep(-0.25, 0.25, eyeR - r);
+    // signed distance of screen point s to the footprint polygon (>= the
+    // true distance outside it: exact along the edges, larger past the
+    // corners; negative inside)
+    float footprintDist(vec2 s) {
+      vec4 d = max(
+        max(s.x * ${glslVec4(coverCos, 0)} + s.y * ${glslVec4(coverSin, 0)} - coverA,
+            s.x * ${glslVec4(coverCos, 4)} + s.y * ${glslVec4(coverSin, 4)} - coverB),
+        max(s.x * ${glslVec4(coverCos, 8)} + s.y * ${glslVec4(coverSin, 8)} - coverC,
+            s.x * ${glslVec4(coverCos, 12)} + s.y * ${glslVec4(coverSin, 12)} - coverD));
+      return max(max(d.x, d.y), max(d.z, d.w));
+    }
+
+    // how far (world units) world point p stands in front of the fabric's
+    // column along the line of sight: the ray eye -> p enters the octagon
+    // (4 slabs: x, y and the two diagonals) at t = tIn, p is at t = 1.
+    // 0 when the ray enters before p (p beside or behind the fabric, or
+    // the eye inside the column) or misses it (parallel rays included)
+    float inFront(vec3 p) {
+      vec3 d = p - eye;
+      const float R2 = 0.70710678;
+      vec4 nd = vec4(d.x, d.y, (d.x + d.y) * R2, (d.x - d.y) * R2);
+      vec4 ne = vec4(eye.x, eye.y, (eye.x + eye.y) * R2, (eye.x - eye.y) * R2);
+      vec4 h = gridColumn.xxyy;
+      // no division by 0: a parallel ray gets a huge t of the right sign
+      vec4 inv = (step(0.0, nd) * 2.0 - 1.0) / max(abs(nd), vec4(1e-5));
+      vec4 t0 = (-h - ne) * inv;
+      vec4 t1 = (h - ne) * inv;
+      vec4 tn = min(t0, t1);
+      vec4 tf = max(t0, t1);
+      float tIn = max(max(tn.x, tn.y), max(tn.z, tn.w));
+      float tOut = min(min(tf.x, tf.y), min(tf.z, tf.w));
+      return tIn < tOut ? (tIn - 1.0) * length(d) : 0.0;
+    }
+
+    // how much a ring point (world p, view v) covers the grid on screen
+    // and stands in front of it: 1 inside the grid's screen footprint
+    // (fading over 3 % of the screen height around it) and clearly in
+    // front of the fabric along its line of sight
+    float coverOf(vec3 p, vec3 v) {
+      vec4 c = projection * vec4(v, 1.0);
+      vec2 s = c.xy / max(c.w, NEAR) * vec2(projection[1][1] / projection[0][0], 1.0);
+      return (1.0 - smoothstep(0.0, 0.06, footprintDist(s))) *
+        smoothstep(0.0, 0.3, inFront(p));
     }
 
     // 0 over the grid square ([-1, 1]^2), 1 past it: the newest rings
@@ -363,11 +446,17 @@ export default function createRenderHistory (regl, opts = {}) {
       return smoothstep(1.0, 1.15, max(abs(g.x), abs(g.y)));
     }
 
-    // ring point of sample i at fractional age a, lifted by f
+    // ring point of sample i at fractional age a, lifted by f (flat over
+    // the grid square)
     vec3 worldPoint(float i, float a, float f) {
       vec2 g = radial(i) * (startDist + a * rowStep);
-      // flattened between the eye and the grid, and over the grid
-      return vec3(g, f * heightScale * (1.0 - 0.6 * frontOf(g)) * offGrid(g));
+      return vec3(g, f * heightScale * offGrid(g));
+    }
+
+    // flattening where a point covers the grid (the line and its strip
+    // use the same factor: the strip's top stays on the line)
+    float flatten(float cover) {
+      return 1.0 - 0.65 * cover;
     }
 
     // clip position with this pass's own depth range
@@ -396,11 +485,17 @@ export default function createRenderHistory (regl, opts = {}) {
         columnValue(min(c0 + 1.0, COLS - 1.0), row), c - c0));
       vec3 pc = worldPoint(i, a, fc);
       vec3 vc = (view * vec4(pc, 1.0)).xyz;
+      // the cover test on the full ridge (the top is the part nearest to
+      // the grid on screen), then flattened as the line is
+      float cover = coverOf(pc, vc);
+      pc.z *= flatten(cover);
+      vc = (view * vec4(pc, 1.0)).xyz;
       // where the strip occludes: geometry only (occlusion sets how much
-      // of what it hides shows through, in the lines' second pass)
-      float gate = smoothstep(0.0, 1.0, a) * (1.0 - frontOf(pc.xy)) *
-        smoothstep(1.4, 3.0, distance(pc, eye)) *
-        smoothstep(DEPTH_NEAR + 0.6, DEPTH_NEAR + 1.4, -vc.z);
+      // of what it hides shows through, in the lines' second pass); not
+      // over the grid, not in the clear zone around the eye
+      float gate = smoothstep(0.0, 1.0, a) * (1.0 - cover) *
+        smoothstep(0.7, 1.6, distance(pc, eye)) *
+        smoothstep(DEPTH_NEAR + 0.3, DEPTH_NEAR + 0.9, -vc.z);
       vec3 p = pc;
       if (vert.z < 0.0) p.z = 0.0;
       else p.z *= smoothstep(0.4, 0.6, gate);
@@ -451,8 +546,10 @@ export default function createRenderHistory (regl, opts = {}) {
       float age = ROWS - 1.0 - vert.y;
       float a = age + scroll;
       float row = rowOf(age);
-      float ip = max(i - 1.0, 0.0);
-      float inx = min(i + 1.0, LAST);
+      // neighbours wrap across the seam (first and last sample are the
+      // same point): the ribbon turns there without a kink
+      float ip = i - 1.0 + LAST * step(i, 0.5);
+      float inx = i + 1.0 - LAST * step(LAST - 0.5, i);
       // the sample and its two neighbours span at most 4 columns: fetch
       // them once (one row of the history texture)
       float xc = columnOf(i);
@@ -466,7 +563,13 @@ export default function createRenderHistory (regl, opts = {}) {
       vec3 pc = worldPoint(i, a, fc);
       vec3 pp = worldPoint(ip, a, valueFrom(cols, base, columnOf(ip)));
       vec3 pn = worldPoint(inx, a, valueFrom(cols, base, columnOf(inx)));
-      float front = frontOf(pc.xy);
+      // over the grid on screen and in front of it: flattened (same factor
+      // as its strip; the neighbours, for the tangent only, take it too)
+      float cover = coverOf(pc, (view * vec4(pc, 1.0)).xyz);
+      float flatK = flatten(cover);
+      pc.z *= flatK;
+      pp.z *= flatK;
+      pn.z *= flatK;
       float eyeDist = distance(pc, eye);
 
       // fades: in over the first row, out with age
@@ -498,12 +601,13 @@ export default function createRenderHistory (regl, opts = {}) {
       rgb *= 1.0 - 0.5 * fog;
       float opacity = clamp(baseLevel + 1.3 * smoothstep(0.0, 0.7, fc), 0.0, 0.95);
       opacity *= amount * fade * (1.0 - fog) * density * hiddenGain;
-      // clear around the eye, gone before this pass's near plane, gone over
-      // the grid square; between the eye and the grid (no strips there to
-      // hide the stack) dimmed, and only the newest few rows kept
-      opacity *= smoothstep(0.8, 2.0, eyeDist) * offGrid(pc.xy) *
-        smoothstep(DEPTH_NEAR, DEPTH_NEAR + 0.5, depth) *
-        (1.0 - 0.75 * front) * (1.0 - front * smoothstep(0.0, 8.0, a));
+      // clear around the eye (a small zone), gone before this pass's near
+      // plane, gone over the grid square; where it covers the grid on
+      // screen, in front of it (no strips there to hide the stack): dimmed,
+      // and only the newest few rows kept
+      opacity *= smoothstep(0.6, 1.6, eyeDist) * offGrid(pc.xy) *
+        smoothstep(DEPTH_NEAR + 0.2, DEPTH_NEAR + 0.7, depth) *
+        (1.0 - 0.75 * cover) * (1.0 - cover * smoothstep(0.0, 8.0, a));
 
       float w = lineWidth * mix(1.0, 1.6, peak);
       w *= pow(clamp(centerDepth / max(depth, NEAR), 0.35, 3.0), 0.5);
@@ -541,7 +645,11 @@ export default function createRenderHistory (regl, opts = {}) {
     scroll: () => scroll,
     dirB: regl.prop('dirB'),
     eye: regl.prop('eye'),
-    eyeR: regl.prop('eyeR'),
+    coverA: regl.prop('coverA'),
+    coverB: regl.prop('coverB'),
+    coverC: regl.prop('coverC'),
+    coverD: regl.prop('coverD'),
+    gridColumn: regl.prop('gridColumn'),
     startDist: regl.prop('startDist'),
     rowStep: regl.prop('rowStep'),
     rowStride: regl.prop('rowStride'),
@@ -607,7 +715,16 @@ export default function createRenderHistory (regl, opts = {}) {
   }, common))
 
   const fin = (x, d) => (typeof x === 'number' && isFinite(x) ? x : d)
-  const shared = { dirB: new Float32Array(2), eye, depthAB: new Float32Array(2) }
+  const shared = {
+    dirB: new Float32Array(2),
+    eye,
+    depthAB: new Float32Array(2),
+    coverA: new Float32Array(4),
+    coverB: new Float32Array(4),
+    coverC: new Float32Array(4),
+    coverD: new Float32Array(4),
+    gridColumn: new Float32Array(2)
+  }
   const fillBatch = []
   const lineBatch = []
   const fillProps = [] // reused per-chunk props (no per-frame allocation)
@@ -650,6 +767,101 @@ export default function createRenderHistory (regl, opts = {}) {
     return mask !== 0
   }
 
+  // the grid's screen footprint (see the header): the volume from the
+  // octagon of half side halfLo at zLo to the one of half side half at zHi
+  // (a well narrows toward its bottom), each square's corners cut at
+  // radius `cap` (inside the newest ring), in view space, clipped to view
+  // depth >= COVER_NEAR, projected, and bounded along the 16 screen
+  // directions into shared.coverA .. coverD (units of half the screen
+  // height, x scaled by the aspect); shared.gridColumn: the top octagon.
+  // Nothing in front of the camera: an empty footprint (covers nothing)
+  const boxView = new Float32Array(16 * 3)
+  const boxDepth = new Float32Array(16)
+  const coverMax = new Float32Array(COVER_DIRS)
+  // the 24 edges, as pairs of point indices (0..7: the bottom octagon,
+  // counterclockwise, 8..15: the top one)
+  const BOX_EDGES = new Int32Array(48)
+  for (let k = 0; k < 8; k++) {
+    BOX_EDGES[k * 6] = k; BOX_EDGES[k * 6 + 1] = (k + 1) % 8
+    BOX_EDGES[k * 6 + 2] = 8 + k; BOX_EDGES[k * 6 + 3] = 8 + (k + 1) % 8
+    BOX_EDGES[k * 6 + 4] = k; BOX_EDGES[k * 6 + 5] = 8 + k
+  }
+  // octagon vertex k (counterclockwise from (h, c)) of the square of half
+  // side h cut along |x| + |y| = h + c (c = h: no cut, the vertices pair
+  // up on the corners): x = XH * h + XC * c, y = YH * h + YC * c
+  const XH = [1, 0, 0, -1, -1, 0, 0, 1]
+  const XC = [0, 1, -1, 0, 0, -1, 1, 0]
+  const YH = [0, 1, 1, 0, 0, -1, -1, 0]
+  const YC = [1, 0, 0, 1, -1, 0, 0, -1]
+  // the diagonal cut of the square of half side h at radius cap
+  const cutOf = (h, cap) => cap >= h * Math.SQRT2 ? 2 * h : h + Math.sqrt(Math.max(cap * cap - h * h, 0))
+  function coverPoint (proj, x, y, z) {
+    const cx = proj[0] * x + proj[4] * y + proj[8] * z + proj[12]
+    const cy = proj[1] * x + proj[5] * y + proj[9] * z + proj[13]
+    const cw = proj[3] * x + proj[7] * y + proj[11] * z + proj[15]
+    if (!(cw > 1e-6)) return
+    const aspect = Math.abs(proj[0]) > 1e-9 ? proj[5] / proj[0] : 1
+    const sx = (cx / cw) * aspect
+    const sy = cy / cw
+    if (!(sx === sx && sy === sy)) return
+    for (let k = 0; k < COVER_DIRS; k++) {
+      const d = coverCos[k] * sx + coverSin[k] * sy
+      if (d > coverMax[k]) coverMax[k] = d
+    }
+  }
+  function footprint (view, proj, box, cap) {
+    coverMax.fill(-1e4)
+    shared.gridColumn[0] = 0
+    shared.gridColumn[1] = 0
+    if (view && proj) {
+      const half = Math.max(0.1, fin(box && box[0], 1.02))
+      const zLo = fin(box && box[1], 0)
+      const zHi = Math.max(zLo, fin(box && box[2], 0.35))
+      const halfLo = Math.min(half, Math.max(0.1, fin(box && box[4], half)))
+      // the corners past the newest ring are under the rings (flat there)
+      const capR = Math.max(0.1, fin(cap, half * Math.SQRT2))
+      const sHi = cutOf(half, capR)
+      const sLo = cutOf(halfLo, capR)
+      shared.gridColumn[0] = half
+      shared.gridColumn[1] = sHi * Math.SQRT1_2
+      for (let k = 0; k < 16; k++) {
+        const top = k >= 8
+        const h = top ? half : halfLo
+        const sc = top ? sHi : sLo
+        const j = k & 7
+        const wx = XH[j] * h + XC[j] * (sc - h)
+        const wy = YH[j] * h + YC[j] * (sc - h)
+        const wz = top ? zHi : zLo
+        for (let r = 0; r < 3; r++) {
+          boxView[k * 3 + r] = view[r] * wx + view[4 + r] * wy + view[8 + r] * wz + view[12 + r]
+        }
+        boxDepth[k] = -boxView[k * 3 + 2]
+        if (boxDepth[k] >= COVER_NEAR) {
+          coverPoint(proj, boxView[k * 3], boxView[k * 3 + 1], boxView[k * 3 + 2])
+        }
+      }
+      // edges crossing the near limit: their crossing point
+      for (let e = 0; e < 48; e += 2) {
+        const i0 = BOX_EDGES[e]
+        const i1 = BOX_EDGES[e + 1]
+        const d0 = boxDepth[i0] - COVER_NEAR
+        const d1 = boxDepth[i1] - COVER_NEAR
+        if ((d0 >= 0) === (d1 >= 0)) continue
+        const t = d0 / (d0 - d1)
+        coverPoint(proj,
+          boxView[i0 * 3] + (boxView[i1 * 3] - boxView[i0 * 3]) * t,
+          boxView[i0 * 3 + 1] + (boxView[i1 * 3 + 1] - boxView[i0 * 3 + 1]) * t,
+          -COVER_NEAR)
+      }
+    }
+    for (let k = 0; k < 4; k++) {
+      shared.coverA[k] = coverMax[k]
+      shared.coverB[k] = coverMax[4 + k]
+      shared.coverC[k] = coverMax[8 + k]
+      shared.coverD[k] = coverMax[12 + k]
+    }
+  }
+
   // fills one item of a batch (props reused)
   function item (list, props, n, chunk, part, stride) {
     if (!props[n]) props[n] = {}
@@ -674,9 +886,13 @@ export default function createRenderHistory (regl, opts = {}) {
   // oldest), floor (contrast floor 0..1), brightness, occlusion (0: the
   // strips hide nothing, 1: what they cover is gone), base (opacity of flat
   // lines), lineWidth (device px), fadePow, fog, share (< 0.75: every other
-  // row, over the same depth), view / projection (optional: skip the draw
-  // when off screen), force, depthBuffer (false: the target has none, the
-  // rings do not occlude each other).
+  // row, over the same depth), view / projection (skip the draw when off
+  // screen; without them no ring point counts as covering the grid), force,
+  // depthBuffer (false: the target has none, the rings do not occlude each
+  // other), gridBox ([half, zLo, zHi, centre z, halfLo]: the fabric's
+  // bounding volume, half its side at the top, its height range including
+  // the 3D shape and the peaks, the height of its centre, and half its side
+  // at the bottom).
   // The target's depth must be cleared (depth only) before this draw.
   function draw (p) {
     const amount = Math.max(0, fin(p.amount, 0))
@@ -687,7 +903,6 @@ export default function createRenderHistory (regl, opts = {}) {
     const pal = p.palette
     shared.dirB[0] = Math.cos(azimuth)
     shared.dirB[1] = Math.sin(azimuth)
-    shared.eyeR = Math.hypot(eye[0], eye[1])
     shared.startDist = Math.max(0, fin(p.start, 1.25))
     shared.rowStep = Math.max(0.001, fin(p.depth, 5)) / ROWS
     shared.rowStride = stride
@@ -716,6 +931,8 @@ export default function createRenderHistory (regl, opts = {}) {
     shared.depthAB[1] = (-2 * f * n) / (f - n)
     // off screen (e.g. the 'top' shot looking down inside the rings)
     if (!p.force && p.view && p.projection && outside(p.view, p.projection, radius)) return
+    // the octagon's corners stop just inside the newest ring
+    footprint(p.view, p.projection, p.gridBox, shared.startDist - 0.05)
 
     // strips: only when they hide something (or for the warm-up)
     const strips = occlusion > 0.01 || p.force
