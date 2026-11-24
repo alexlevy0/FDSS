@@ -28,8 +28,8 @@ const TAU = Math.PI * 2
 // height z, look-at height tz, angular speed factor and drift factor.
 // `t` is the time since the shot started (the dive closes in over time).
 // lookAhead moves the look-at point that far past the centre, away from
-// the eye, so the shot also takes in the history landscape that lies on
-// the far side of the grid (0 = look at the centre).
+// the eye, so the shot also takes in the far side of the history rings
+// around the grid, where their lows face (0 = look at the centre).
 // A switch blends the parameters of the two paths (both keep moving) with
 // an eased curve, so there is never a cut -- except cut(), the hard cuts
 // the director asks for on bars during drops: an instant switch to another
@@ -76,7 +76,7 @@ export const CAMERA_SHOTS = Object.keys(SHOTS)
 // factor so each shot keeps its character (wide stays wide, graze and dive
 // keep their low / close feel and are barely touched), and `center` is the
 // fraction of the fabric's off-centre offset that is corrected (wide and
-// graze look past the centre on purpose, to take in the history landscape,
+// graze look past the centre on purpose, to take in the history rings,
 // so they are only partly re-centred).
 const SHOT_FRAMING = {
   classic: { fmin: 0.6, fmax: 1.5, center: 0.8 },
