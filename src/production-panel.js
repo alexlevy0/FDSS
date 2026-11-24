@@ -361,9 +361,28 @@ export default function createProductionPanel (playlist, controls) {
       }
       if (list.children[i] !== row.li) list.insertBefore(row.li, list.children[i] || null)
       row.index.textContent = String(i + 1).padStart(2, '0')
+      // 'error': cannot start at all ("illisible"), or its file changed on
+      // disk since the drop ("à redéposer"): skipped, not clickable.
+      // 'damaged': played, then failed part way: a softer warning, still
+      // clickable (a click plays it again, the failure may not recur).
       const error = track.status === 'error'
-      row.dur.textContent = error ? 'illisible' : track.duration ? formatSeconds(track.duration) : '…'
+      const damaged = track.status === 'damaged'
+      row.dur.textContent = error
+        ? (track.reason === 'file' ? 'à redéposer' : 'illisible')
+        : damaged
+          ? `⚠ ${formatSeconds(track.failedAt || 0)}`
+          : track.duration ? formatSeconds(track.duration) : '…'
+      const hint = error
+        ? (track.reason === 'file'
+            ? 'Fichier modifié, déplacé ou supprimé depuis son ajout : redéposez-le'
+            : 'Format illisible par ce navigateur')
+        : damaged
+          ? `Erreur de lecture à ${formatSeconds(track.failedAt || 0)} : cliquez pour réessayer`
+          : ''
+      if (hint) row.li.title = hint
+      else row.li.removeAttribute('title')
       row.li.classList.toggle('is-error', error)
+      row.li.classList.toggle('is-damaged', damaged)
       row.name.disabled = error
       const isCur = !!cur && cur.id === track.id
       row.li.classList.toggle('is-current', isCur)
@@ -504,7 +523,7 @@ export default function createProductionPanel (playlist, controls) {
   })
 
   playlist.subscribe((type, detail) => {
-    if (type === 'error') controls.showMessage(detail)
+    if (type === 'error') controls.showMessage(detail, 7000) // long enough to read a file name
     // the panel belongs to the mode: leaving it (a mix, LIVE) closes it
     else if (type === 'mode' && !detail) setOpen(false)
     else render()
