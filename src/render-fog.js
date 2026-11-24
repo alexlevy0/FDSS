@@ -30,8 +30,10 @@
 // 16; at 64-150 it would be 1/32-1/8: blocky wisps). Without fragment highp
 // a single octave is used.
 //
-// The far history landscape (behind the fabric) gets less density: it
-// must keep its contrast in the breakdowns, where the haze is densest.
+// The outer history rings (past the fabric along the view ray) get less
+// density: they must keep their contrast in the breakdowns, where the haze
+// is densest. The nearer rings (beside the fabric, on the camera side) get
+// the normal density.
 //
 // In-scattered colour: a dark palette base, plus a brighter tint toward the
 // orbiting key light (a narrow forward lobe) and around the god-ray source
@@ -232,7 +234,8 @@ export default function createRenderFog (regl, { type = 'uint8', hdr = false } =
           m = max(0.0, 1.0 + noiseAmount * (2.0 * n - 1.0));
         }
 
-        // the far landscape (past the fabric) keeps most of its contrast
+        // the outer history rings (past the fabric along the ray) keep most
+        // of their contrast
         float farK = 1.0 - 0.6 * smoothstep(farFade.x, farFade.y, T);
         float tau = min(sigma * farK * L * mean * m, 8.0);
         float fog = min(1.0 - exp(-tau), maxFog);
@@ -379,7 +382,8 @@ export default function createRenderFog (regl, { type = 'uint8', hdr = false } =
     u.well[1] = Math.min(Math.max(fin(wellRadius, 1.35), 0.05), 5)
     for (let i = 0; i < 3; i++) u.occluder[i] = fin(center[i], 0)
     u.occluder[3] = Math.min(Math.max(fin(occluderRadius, 0), 0), 5)
-    // past the fabric (it spans about camDist +- 1.4), toward the landscape
+    // past the fabric (it spans about camDist +- 1.4), toward the outer
+    // history rings
     u.farFade[0] = camDist * 1.3
     u.farFade[1] = camDist * 2.2
     u.glowUv[0] = Math.min(Math.max(fin(glowUv && glowUv[0], 0.5), -1), 2)
@@ -394,7 +398,7 @@ export default function createRenderFog (regl, { type = 'uint8', hdr = false } =
       sigma: Math.min(Math.max(fin(density, 0), 0), 20),
       heightScale: Math.min(Math.max(fin(heightScale, 0.35), 0.01), 10),
       startDist: camDist * Math.min(Math.max(fin(start, 0.7), 0), 2),
-      // far enough to cross the fabric and the history landscape behind it
+      // far enough to cross the fabric and the history rings past it
       maxDist: camDist * 3,
       maxFog: Math.min(Math.max(fin(maxFog, 0.55), 0), 0.95),
       noiseAmount: Math.min(Math.max(fin(noise, 0), 0), 1),

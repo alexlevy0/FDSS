@@ -120,11 +120,18 @@ const sceneTexture = regl.texture({
   mag: 'linear',
   wrap: 'clamp'
 })
-const sceneFbo = regl.framebuffer({
-  color: sceneTexture,
-  depth: false,
-  stencil: false
-})
+// The scene target also has a 16-bit depth buffer (resized with it), used
+// only by the history rings (render-history.js): every other pass draws with
+// depth disabled. Without it (an incomplete attachment), the rings still
+// draw, only without their mutual occlusion.
+let sceneFbo
+let sceneDepth = true
+try {
+  sceneFbo = regl.framebuffer({ color: sceneTexture, depth: true, stencil: false })
+} catch (e) {
+  sceneDepth = false
+  sceneFbo = regl.framebuffer({ color: sceneTexture, depth: false, stencil: false })
+}
 const renderToScene = regl({ framebuffer: sceneFbo })
 const renderBloom = createRenderBloom(regl, hdrInfo)
 const renderPost = createRenderPost(regl, hdrInfo)
@@ -186,11 +193,14 @@ const liveSettings = { gain: 1 }
 // per-track cosine palette, crossfaded on track change, drifting with energy
 const palette = createPalette()
 
-// time dimension: the landscape of the last seconds of spectra behind the
-// grid, and sparks thrown off the peaks on kicks (smaller on touch devices)
+// time dimension: the landscape of the last seconds of spectra in rings
+// around the grid, and sparks thrown off the peaks on kicks (smaller on touch devices)
 const renderHistory = createRenderHistory(regl, {
   rows: coarsePointer ? 96 : 192,
   cols: coarsePointer ? 40 : 64,
+  // samples per column around a ring (2: round at the outer radius; 1
+  // halves the vertex cost, visibly polygonal on the outer rings)
+  sub: 2,
   bandCount: features.bandCount
 })
 const renderSparks = createRenderSparks(regl, { count: coarsePointer ? 128 : 512 })
@@ -447,16 +457,15 @@ const settings = {
   godRaysSamples: coarsePointer ? 16 : 40,
   godRaysThreshold: 0.08, // linear luminance feeding the rays
 
-  // history landscape ("mix landscape"): past spectra as stacked lines
-  // receding behind the grid, strongest in breakdowns (SECTION_LOOK)
+  // history landscape ("mix landscape"): past spectra as concentric rings
+  // of lines around the grid, newest inside, strongest in breakdowns
+  // (SECTION_LOOK)
   historyAmount: 0.8, // master, 0 = off
   historyLock: 'auto', // 'auto' follows the sections, 'on' / 'off' lock it
   historySeconds: 16, // s of music the landscape spans
   historyHeight: 0.3, // world units of a full-scale ridge
-  historyStart: 1.25, // distance of the newest row from the grid centre
-  historyDepth: 5, // world length of the stack, newest to oldest
-  historyWidth: 1.3, // half width at the newest row
-  historySpread: 0.4, // extra half width per unit of distance
+  historyStart: 1.25, // radius of the newest ring around the grid centre
+  historyDepth: 5, // radial distance from the newest ring to the oldest
   historyFloor: 0.45, // contrast floor: quiet stays flat and dark
   historyBrightness: 0.9, // still dimmer than the grid (0.45 was invisible by eye)
   historyOcclusion: 0.85, // newer ridges hide the older ones behind them
@@ -1021,8 +1030,6 @@ timeGUI.add(settings, 'historySeconds', 4, 60).step(1).name('history span (s)')
 drift.add(timeGUI.add(settings, 'historyHeight', 0, 1).step(0.01).name('history height'))
 timeGUI.add(settings, 'historyStart', 0.5, 4).step(0.05).name('history start')
 drift.add(timeGUI.add(settings, 'historyDepth', 1, 12).step(0.1).name('history depth'))
-timeGUI.add(settings, 'historyWidth', 0.3, 4).step(0.05).name('history width')
-drift.add(timeGUI.add(settings, 'historySpread', 0, 1.5).step(0.01).name('history spread'))
 drift.add(timeGUI.add(settings, 'historyFloor', 0, 0.95).step(0.01).name('history floor'), { amount: 0.03, absolute: true })
 drift.add(timeGUI.add(settings, 'historyBrightness', 0, 2).step(0.01).name('history brightness'))
 drift.add(timeGUI.add(settings, 'historyOcclusion', 0, 1).step(0.01).name('history occlusion'), { amount: 0.05, absolute: true })
@@ -2124,6 +2131,9 @@ function renderFrame (time, dt) {
     if (cutClear) {
       regl.clear({ color: [0, 0, 0, 0], depth: 1 })
     } else if (settings.motionBlur) {
+      // depth first (only the history rings use it): cleared at the start
+      // of the scene pass, so tiled GPUs need not load it from memory
+      regl.clear({ depth: 1 })
       // renderColoredQuad({ color: [0.18, 0.18, 0.18, settings.motionBlurAmount] })
       // renderColoredQuad({ color: [0.08, 0.08, 0.08, settings.motionBlurAmount] })
       renderColoredQuad({
@@ -2138,8 +2148,11 @@ function renderFrame (time, dt) {
     }
   })
 
-  // the landscape of the past, behind the grid: drawn first, so its black
-  // occlusion strips never cover the grid, the reflection or the dust
+  // the rings of the past around the grid: drawn first, so their black
+  // occlusion strips never cover the grid, the reflection or the dust.
+  // They occlude each other through the scene target's depth buffer,
+  // cleared (depth only: the colour is the motion-blur feedback) in the
+  // scene pass just above; nothing writes depth before this draw
   if (historyAmount > 1e-3 || warmingUp) {
     renderToScene(() => {
       renderGlobals(() => {
@@ -2149,8 +2162,6 @@ function renderFrame (time, dt) {
           height: settings.historyHeight,
           start: settings.historyStart,
           depth: settings.historyDepth,
-          width: settings.historyWidth,
-          spread: settings.historySpread,
           floor: settings.historyFloor,
           brightness: settings.historyBrightness,
           occlusion: settings.historyOcclusion,
@@ -2163,7 +2174,9 @@ function renderFrame (time, dt) {
           // skipped when off screen
           view: frameView,
           projection: frameProjection,
-          force: warmingUp
+          force: warmingUp,
+          // without it: no occlusion between rings (see sceneFbo)
+          depthBuffer: sceneDepth
         })
       })
     })
