@@ -174,6 +174,7 @@ const WAVE_SIZE = coarsePointer ? 128 : 256
 const renderWaves = createRenderWaves(regl, Object.assign({ size: WAVE_SIZE }, hdrInfo))
 
 const tracks = [
+  { title: '#4', artist: 'fievresdusamedisoir', path: 'audio/fievresdusamedisoir4.m4a' },
   { title: '#3', artist: 'fievresdusamedisoir', path: 'audio/fievresdusamedisoir3.mp3' },
   { title: '#2', artist: 'fievresdusamedisoir', path: 'audio/fievresdusamedisoir2.mp3' },
   { title: '#1', artist: 'fievresdusamedisoir', path: 'audio/fievresdusamedisoir.mp3' }
