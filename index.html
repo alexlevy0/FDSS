@@ -376,8 +376,15 @@
 
     /* ---------- live input ---------- */
 
-    .live {
+    .modes {
       grid-area: live;
+      display: flex;
+      align-items: center;
+      gap: 0.125rem;
+      min-width: 0;
+    }
+
+    .live {
       position: relative;
       display: flex;
       align-items: center;
@@ -388,6 +395,7 @@
       display: none;
     }
 
+    .prod-toggle,
     .live-toggle,
     .live-menu button {
       min-height: var(--tap);
@@ -404,6 +412,8 @@
       transition: color 200ms ease, background-color 200ms ease, opacity 200ms ease;
     }
 
+    .prod-toggle:hover,
+    .prod-toggle[aria-expanded="true"],
     .live-toggle:hover,
     .live-toggle[aria-expanded="true"],
     .live-menu button:hover {
@@ -413,6 +423,15 @@
 
     .live-toggle[aria-pressed="true"] {
       color: var(--live-red);
+    }
+
+    .prod-toggle[hidden] {
+      display: none;
+    }
+
+    .prod-toggle[aria-pressed="true"] {
+      color: var(--ink);
+      box-shadow: inset 0 0 0 1px var(--ink-faint);
     }
 
     .live-toggle.is-pending {
@@ -486,7 +505,8 @@
       visibility: hidden;
     }
 
-    .is-live .track.selected button {
+    .is-live .track.selected button,
+    .is-prod .track.selected button {
       color: var(--ink-dim);
       background: transparent;
     }
@@ -529,9 +549,14 @@
           "tracks tracks tracks tracks";
       }
 
-      .live {
+      .modes {
         grid-area: tracks;
         justify-self: end;
+        justify-content: flex-end;
+        min-width: 0;
+      }
+
+      .live {
         justify-content: flex-end;
         min-width: 0;
       }
@@ -548,6 +573,436 @@
       .track-selector {
         justify-self: start;
         margin-left: -0.6em;
+      }
+    }
+
+
+    /* ---------- production mode (P) ---------- */
+
+    .prod-panel {
+      position: fixed;
+      top: max(0.75rem, env(safe-area-inset-top));
+      left: max(0.75rem, env(safe-area-inset-left));
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      width: min(25rem, calc(100vw - 1.5rem));
+      max-height: calc(100% - 1.5rem - 9.5rem);
+      box-sizing: border-box;
+      padding: 0.75rem 0.75rem 0.65rem;
+      border-radius: 14px;
+      background: rgba(0, 0, 0, 0.78);
+      box-shadow: 0 0 0 1px var(--ink-faint), 0 12px 40px rgba(0, 0, 0, 0.5);
+      -webkit-backdrop-filter: blur(14px);
+      backdrop-filter: blur(14px);
+      font-size: clamp(0.8125rem, 0.75rem + 0.25vw, 0.9375rem);
+      line-height: 1.35;
+      letter-spacing: 0.02em;
+    }
+
+    .prod-panel[hidden] {
+      display: none;
+    }
+
+    /* focused by P so Tab goes into it; no ring around the whole panel */
+    .prod-panel:focus {
+      outline: none;
+    }
+
+    .prod-panel button,
+    .prod-panel select,
+    .prod-panel input {
+      font: inherit;
+      color: inherit;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .prod-panel :focus-visible {
+      outline: 1px solid var(--ink-dim);
+      outline-offset: 2px;
+    }
+
+    .prod-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .prod-heading {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: baseline;
+      gap: 0.75em;
+      white-space: nowrap;
+    }
+
+    .prod-title {
+      margin: 0;
+      font-size: 0.78em;
+      font-weight: normal;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .prod-summary {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--ink-dim);
+      font-variant-numeric: tabular-nums;
+      font-size: 0.9em;
+    }
+
+    .prod-icon {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--ink-dim);
+      cursor: pointer;
+      line-height: 1;
+      transition: color 150ms ease, background-color 150ms ease;
+    }
+
+    .prod-icon:hover:not(:disabled) {
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .prod-icon:disabled {
+      opacity: 0.25;
+      cursor: default;
+    }
+
+    .prod-close {
+      width: 2.25rem;
+      height: 2.25rem;
+      margin-right: -0.25rem;
+      font-size: 1.35em;
+    }
+
+    .prod-btn {
+      min-height: 2.25rem;
+      padding: 0 0.85em;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--ink);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background-color 150ms ease, opacity 150ms ease;
+    }
+
+    .prod-btn:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.16);
+    }
+
+    .prod-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+    }
+
+    .prod-add {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.35rem 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .prod-hint,
+    .prod-empty {
+      color: var(--ink-dim);
+      font-size: 0.9em;
+    }
+
+    .prod-empty {
+      margin: 0.75rem 0;
+      padding: 1.25rem 1rem;
+      border: 1px dashed var(--ink-faint);
+      border-radius: 10px;
+      text-align: center;
+    }
+
+    .prod-empty[hidden],
+    .prod-list[hidden] {
+      display: none;
+    }
+
+    .prod-list {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      margin: 0 -0.25rem;
+      padding: 0 0.25rem;
+      list-style: none;
+    }
+
+    .prod-track {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      min-height: 2.5rem;
+      border-radius: 8px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .prod-track + .prod-track {
+      border-top: 1px solid rgba(236, 236, 236, 0.07);
+    }
+
+    .prod-track.is-current {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .prod-track.is-dragging {
+      background: rgba(255, 255, 255, 0.14);
+    }
+
+    .prod-list.is-sorting {
+      cursor: grabbing;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .prod-handle {
+      flex: none;
+      width: 1.75rem;
+      align-self: stretch;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--ink-faint);
+      cursor: grab;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .prod-handle:hover {
+      color: var(--ink-dim);
+    }
+
+    .prod-index {
+      flex: none;
+      width: 1.6em;
+      color: var(--ink-dim);
+      font-size: 0.85em;
+    }
+
+    .prod-name {
+      flex: 1;
+      min-width: 0;
+      min-height: 2.25rem;
+      padding: 0 0.25rem;
+      border: 0;
+      background: transparent;
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+      border-radius: 6px;
+    }
+
+    .prod-name:disabled {
+      cursor: default;
+    }
+
+    .prod-track.is-current .prod-name {
+      font-weight: 600;
+    }
+
+    .prod-track.is-error .prod-name,
+    .prod-track.is-error .prod-dur {
+      color: var(--live-red);
+      opacity: 0.7;
+      text-decoration: line-through;
+    }
+
+    .prod-dur {
+      flex: none;
+      min-width: 3em;
+      text-align: right;
+      color: var(--ink-dim);
+      font-size: 0.85em;
+    }
+
+    .prod-up,
+    .prod-down {
+      width: 1.75rem;
+      font-size: 0.9em;
+    }
+
+    .prod-progress {
+      position: absolute;
+      left: 0.5rem;
+      right: 0.5rem;
+      bottom: 3px;
+      height: 1px;
+      background: var(--ink);
+      transform-origin: 0 50%;
+      transform: scaleX(0);
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .prod-track.is-current .prod-progress {
+      opacity: 0.8;
+    }
+
+    .prod-settings {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.4rem 0.75rem;
+      margin-top: 0.6rem;
+      padding-top: 0.6rem;
+      border-top: 1px solid var(--ink-faint);
+    }
+
+    .prod-setting {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-height: 2.25rem;
+      min-width: 0;
+    }
+
+    .prod-setting:first-child {
+      grid-column: 1 / -1;
+    }
+
+    .prod-setting-name {
+      color: var(--ink-dim);
+      font-size: 0.9em;
+      white-space: nowrap;
+    }
+
+    .prod-setting input[type="range"] {
+      flex: 1;
+      min-width: 0;
+      accent-color: var(--ink);
+    }
+
+    .prod-setting-value {
+      min-width: 3em;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .prod-setting select {
+      flex: 1;
+      min-width: 0;
+      min-height: 2rem;
+      padding: 0 0.4em;
+      border: 0;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.9em;
+    }
+
+    .prod-setting select option {
+      background: #000;
+    }
+
+    .prod-check {
+      cursor: pointer;
+    }
+
+    .prod-check input {
+      margin: 0;
+      accent-color: var(--ink);
+    }
+
+    .prod-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-top: 0.5rem;
+    }
+
+    .prod-leave {
+      margin-left: auto;
+      background: transparent;
+      color: var(--ink-dim);
+    }
+
+    .prod-leave:hover:not(:disabled) {
+      color: var(--ink);
+    }
+
+    .prod-drop {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.55);
+      box-shadow: inset 0 0 0 2px var(--ink-dim);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 150ms ease, visibility 0s linear 150ms;
+    }
+
+    .prod-drop.is-shown {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 150ms ease, visibility 0s;
+    }
+
+    .prod-drop-label {
+      padding: 0.6em 1.2em;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.75);
+      font-size: clamp(1rem, 0.9rem + 0.6vw, 1.4rem);
+      letter-spacing: 0.08em;
+    }
+
+    @media (max-width: 40rem) {
+      .prod-panel {
+        right: max(0.75rem, env(safe-area-inset-right));
+        width: auto;
+        max-height: calc(100% - 1.5rem - 12rem);
+      }
+
+      /* phone: rows and their buttons at the player's touch size */
+      .prod-track {
+        min-height: var(--tap);
+      }
+
+      .prod-icon,
+      .prod-up,
+      .prod-down {
+        width: 2.5rem;
+        height: 2.5rem;
+      }
+
+      .prod-handle {
+        width: 2.25rem;
+      }
+    }
+
+    /* touch: the handle reorders already; ↑ / ↓ make room for a bigger × */
+    @media (pointer: coarse) {
+      .prod-up,
+      .prod-down {
+        display: none;
+      }
+
+      .prod-del {
+        width: var(--tap);
+        height: var(--tap);
       }
     }
 
@@ -578,7 +1033,9 @@
       .controls-container.is-visible.is-idle,
       .seeker-track,
       .seeker-thumb,
-      .live-message {
+      .live-message,
+      .prod-drop,
+      .prod-drop.is-shown {
         transition: none !important;
       }
 
@@ -633,6 +1090,9 @@
         <span class="artist"></span>
       </div>
       <ol class="track-selector" aria-label="Mixes"></ol>
+      <div class="modes">
+      <button type="button" class="prod-toggle" aria-pressed="false" aria-expanded="false"
+        aria-label="Mode production (P)" title="Mode production (P)" hidden>prod</button>
       <div class="live" hidden>
         <button type="button" class="live-toggle" aria-haspopup="true" aria-expanded="false"
           aria-pressed="false" aria-label="Entrée live (L)">live</button>
@@ -641,6 +1101,7 @@
           <button type="button" data-live="display">Onglet ou écran</button>
         </div>
         <select class="live-device" aria-label="Entrée audio" hidden></select>
+      </div>
       </div>
       <div class="elapsed-time" aria-label="Temps écoulé et durée totale">
         <span class="current">0:00</span> / <span class="total">0:00</span>

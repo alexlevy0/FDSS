@@ -15,6 +15,13 @@
 // playing in the room / the other tab, so routing it out again would echo
 // (and feed back with a mic). useFile() switches back. Both paths share the
 // splitter, so everything downstream is unchanged.
+//
+// Node input: useNode(node, isPlaying) feeds the analysers from any audio
+// node of this context (the production playlist's bus, see playlist.js).
+// The node's owner routes it to the speakers itself; here it only joins the
+// splitter. File, stream and node inputs are mutually exclusive: each use*()
+// detaches the other two, and the file element is paused whenever it is not
+// the input. inputKind() says which one is active.
 export default function createAudio (src) {
   const element = new window.Audio()
   element.preload = 'auto'
@@ -69,6 +76,8 @@ export default function createAudio (src) {
   liveGain.connect(splitter)
   let streamSource = null
   let fileConnected = true
+  let nodeInput = null // useNode(): an external node feeding the splitter
+  let nodePlaying = null // its "is sound flowing" predicate
   // webkitAudioContext (Safari < 14.1) only has disconnect(output): a node
   // argument is coerced to output 0 instead of throwing, which would also
   // cut the speakers. There, drop everything and re-add the speakers.
@@ -87,6 +96,20 @@ export default function createAudio (src) {
     } catch (e) {
       source.disconnect()
       source.connect(context.destination)
+    }
+  }
+
+  function detachNode () {
+    if (!nodeInput) return
+    const node = nodeInput
+    nodeInput = null
+    nodePlaying = null
+    try {
+      node.disconnect(splitter)
+    } catch (e) {
+      // prefixed context: disconnect(output) only. The owner reconnects
+      // its own speaker path on its side (playlist.js does)
+      try { node.disconnect() } catch (err) {}
     }
   }
 
@@ -151,6 +174,26 @@ export default function createAudio (src) {
       if (streamSource) streamSource.disconnect()
       streamSource = next
       next.connect(liveGain)
+      detachNode()
+      disconnectFile()
+      element.pause()
+      resumeContext()
+    },
+    // Feeds the analysers from `node` (an AudioNode of this context) instead
+    // of the file or a stream; `isPlaying` () => bool tells the visuals when
+    // sound flows. The file is paused and a stream input dropped (the caller
+    // stops the live input first so its UI state follows).
+    useNode (node, isPlaying) {
+      if (streamSource) {
+        streamSource.disconnect()
+        streamSource = null
+      }
+      if (nodeInput !== node) {
+        detachNode()
+        node.connect(splitter)
+        nodeInput = node
+      }
+      nodePlaying = typeof isPlaying === 'function' ? isPlaying : null
       disconnectFile()
       element.pause()
       resumeContext()
@@ -161,6 +204,7 @@ export default function createAudio (src) {
         streamSource.disconnect()
         streamSource = null
       }
+      detachNode()
       if (!fileConnected) {
         source.connect(splitter)
         fileConnected = true
@@ -169,10 +213,16 @@ export default function createAudio (src) {
     isLive () {
       return !!streamSource
     },
+    // 'stream' | 'node' | 'file'
+    inputKind () {
+      return streamSource ? 'stream' : nodeInput ? 'node' : 'file'
+    },
     // what the visuals treat as "sound is flowing": a live input always
-    // counts, the file only while it plays
+    // counts, a node input when its owner says so, the file while it plays
     isPlaying () {
-      return streamSource ? true : !element.paused
+      if (streamSource) return true
+      if (nodeInput) return !!(nodePlaying && nodePlaying())
+      return !element.paused
     },
     setLiveGain (value) {
       const v = Number(value)
@@ -180,10 +230,11 @@ export default function createAudio (src) {
     },
     resumeContext,
     // Resolves true if playback started, false if the browser blocked it
-    // (autoplay policy: no user gesture yet). In live mode there is nothing
-    // to start but the context itself.
+    // (autoplay policy: no user gesture yet). In live mode (and with a node
+    // input, whose owner starts its own sources) there is nothing to start
+    // but the context itself.
     play () {
-      if (streamSource) {
+      if (streamSource || nodeInput) {
         if (!needsResume()) return Promise.resolve(context.state === 'running')
         return resumeBounded().then(() => context.state === 'running')
       }
