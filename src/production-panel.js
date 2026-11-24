@@ -16,6 +16,16 @@
 // (mouse, touch or pen) or use the arrow buttons to reorder; × removes.
 // Settings (crossfade, curve, loop) are kept in localStorage by the engine.
 //
+// "Exporter" renders the whole playlist, in its current order and with the
+// same crossfades, into one WAV file that the browser downloads
+// (playlist-export.js). It works on a snapshot taken at the click: the list
+// and the settings stay editable and playback goes on meanwhile, and the
+// progress block says so ("Figé au lancement : 30 morceaux, fondu 6 s,
+// …"). A progress bar with the track being processed and "Annuler" replace
+// the button until it is done. Tracks the playlist already marks
+// unreadable are left out and reported with those the export fails to
+// decode. Reloading or closing the tab while it runs asks for confirmation.
+//
 // Focus. As everywhere in the player, a control clicked with the mouse (or
 // touched) does not keep the focus, so Space stays play / pause and P stays
 // the panel toggle; keyboard activation keeps the focus where a keyboard
@@ -25,6 +35,7 @@
 
 import { isTextField } from './audio-controls'
 import { AUDIO_EXTENSIONS, isAudioFile } from './playlist'
+import { exportPlaylist, downloadBlob } from './playlist-export'
 
 const ACCEPT = 'audio/*,' + AUDIO_EXTENSIONS.map((e) => '.' + e).join(',')
 
@@ -112,6 +123,25 @@ export default function createProductionPanel (playlist, controls) {
   const clearBtn = actions.appendChild(button('prod-btn', 'Vider'))
   const leaveBtn = actions.appendChild(button('prod-btn prod-leave', 'Quitter la production'))
 
+  // export: the button and its hint, replaced by the progress while it runs
+  const exportEl = panel.insertBefore(el('div', 'prod-export'), actions)
+  const exportIdle = exportEl.appendChild(el('div', 'prod-export-idle'))
+  const exportBtn = exportIdle.appendChild(button('prod-btn prod-export-btn', 'Exporter'))
+  exportIdle.appendChild(el('span', 'prod-hint', 'un seul fichier WAV, fondus compris'))
+  const exportRun = exportEl.appendChild(el('div', 'prod-export-run'))
+  exportRun.hidden = true
+  const exportHead = exportRun.appendChild(el('div', 'prod-export-head'))
+  const exportLabel = exportHead.appendChild(el('span', 'prod-export-label'))
+  const exportCancel = exportHead.appendChild(button('prod-btn prod-export-cancel', 'Annuler'))
+  const exportBar = exportRun.appendChild(el('div', 'prod-export-bar'))
+  exportBar.setAttribute('role', 'progressbar')
+  exportBar.setAttribute('aria-label', 'Export')
+  exportBar.setAttribute('aria-valuemin', '0')
+  exportBar.setAttribute('aria-valuemax', '100')
+  const exportFill = exportBar.appendChild(el('span', 'prod-export-fill'))
+  const exportTrack = exportRun.appendChild(el('span', 'prod-export-track'))
+  const exportInfo = exportRun.appendChild(el('span', 'prod-export-track prod-export-info'))
+
   document.body.appendChild(panel)
 
   const overlay = document.body.appendChild(el('div', 'prod-drop'))
@@ -125,6 +155,7 @@ export default function createProductionPanel (playlist, controls) {
   // ---- open / close ----
 
   let open = false
+  let exporting = null // AbortController of the export running
 
   function setOpen (value, focus) {
     if (open === value) return
@@ -347,6 +378,7 @@ export default function createProductionPanel (playlist, controls) {
     list.hidden = tracks.length === 0
     shuffleBtn.disabled = tracks.length < 2
     clearBtn.disabled = tracks.length === 0
+    exportBtn.disabled = !!exporting || !tracks.some((t) => t.status !== 'error')
     const n = tracks.length
     summaryEl.textContent = n
       ? `${n} morceau${n > 1 ? 'x' : ''} · ${formatSeconds(playlist.totalDuration())}`
@@ -367,6 +399,93 @@ export default function createProductionPanel (playlist, controls) {
     playlist.clear()
     if (e.detail === 0) addBtn.focus() // the button is disabled now
   })
+
+  // ---- export ----
+
+  function setExportProgress ({ fraction, name, phase }) {
+    const pct = Math.floor(fraction * 100)
+    exportLabel.textContent = `Export… ${pct} %`
+    exportFill.style.transform = `scaleX(${fraction})`
+    exportBar.setAttribute('aria-valuenow', String(pct))
+    exportTrack.textContent = name ? `${phase === 'decode' ? 'Décodage' : 'Mixage'} : ${name}` : ''
+  }
+
+  function plural (n, one, many) {
+    return n > 1 ? many : one
+  }
+
+  // "Alpha, Bravo, Charlie, … (+2)": stays readable on a phone
+  function shortList (names, max = 3) {
+    const head = names.slice(0, max).join(', ')
+    return names.length > max ? `${head}, … (+${names.length - max})` : head
+  }
+
+  // a reload / close would throw the running export away
+  function onBeforeUnload (e) {
+    e.preventDefault()
+    e.returnValue = ''
+  }
+
+  // keyboard (detail 0): the focus goes to "Annuler", which replaces the
+  // button; a pointer click leaves no focus (Space stays play / pause)
+  async function startExport (e) {
+    if (exporting) return
+    const all = playlist.getTracks()
+    const snapshot = all.filter((t) => t.status !== 'error')
+    // already marked "illisible": left out, but reported like the others
+    const preSkipped = all.filter((t) => t.status === 'error').map((t) => t.name)
+    if (!snapshot.length) return
+    const settings = { crossfade: playlist.settings.crossfade, curve: playlist.settings.curve }
+    const controller = new AbortController()
+    exporting = controller
+    window.addEventListener('beforeunload', onBeforeUnload)
+    const focusCancel = !!e && e.detail === 0
+    exportIdle.hidden = true
+    exportRun.hidden = false
+    const n = snapshot.length
+    const curveName = settings.curve === 'linear' ? 'linéaire' : 'puissance égale'
+    // the export does not follow later edits of the list or the settings
+    exportInfo.textContent = `Figé au lancement : ${n} ${plural(n, 'morceau', 'morceaux')}, fondu ${settings.crossfade} s, ${curveName}`
+    setExportProgress({ fraction: 0, name: '', phase: 'decode' })
+    render()
+    if (focusCancel) exportCancel.focus()
+    try {
+      const result = await exportPlaylist(
+        snapshot.map((t) => ({ name: t.name, file: t.file, duration: t.duration })),
+        settings,
+        { onProgress: setExportProgress, signal: controller.signal }
+      )
+      downloadBlob(result.blob, result.filename)
+      let text = `Export terminé : ${result.filename} (${formatSeconds(result.seconds)}, fondu ${settings.crossfade} s)`
+      // count the tracks, list each name once (the same file can be in twice)
+      const skipped = preSkipped.concat(result.skipped)
+      const k = skipped.length
+      if (k) text += ` · ${k} ${plural(k, 'morceau illisible ignoré', 'morceaux illisibles ignorés')} : ${shortList([...new Set(skipped)])}`
+      controls.showMessage(text, 7000)
+    } catch (e) {
+      if (e && e.name === 'AbortError') controls.showMessage('Export annulé', 3000)
+      else controls.showMessage(exportErrorText(e), 7000)
+    } finally {
+      exporting = null
+      window.removeEventListener('beforeunload', onBeforeUnload)
+      const hadFocus = exportRun.contains(document.activeElement)
+      exportRun.hidden = true
+      exportIdle.hidden = false
+      render()
+      if (hadFocus) (exportBtn.disabled ? addBtn : exportBtn).focus()
+    }
+  }
+
+  function exportErrorText (e) {
+    const code = e && e.code
+    if (code === 'empty') return 'Export impossible : aucun morceau lisible'
+    if (code === 'tooLong') return 'Export impossible : plus de 6 h 45 de musique, au-delà de la limite d\'un fichier WAV (4 Go)'
+    if (code === 'memory') return 'Export impossible : mémoire insuffisante' + (e.detail ? ` (${e.detail})` : '')
+    return 'Export impossible : ' + ((e && (e.detail || e.message)) || 'erreur inconnue')
+  }
+
+  exportBtn.addEventListener('click', startExport)
+  exportCancel.addEventListener('click', () => { if (exporting) exporting.abort() })
 
   // pointer clicks leave no focus on a button (bubbling: runs after the
   // buttons' own handlers), so the next Space is play / pause, not that
